@@ -1,0 +1,58 @@
+{
+  "ORD-10001": {
+    "order_id": "ORD-10001",
+    "product_name": "Wireless Mouse",
+    "status": "delivered",
+    "delivery_days_ago": 2,
+    "amount": 69.99,
+    "refunded": false
+  },
+  "ORD-10002": {
+    "order_id": "ORD-10002",
+    "product_name": "Mechanical Keyboard",
+    "status": "delivered",
+    "delivery_days_ago": 1,
+    "amount": 149.99,
+    "refunded": false
+  },
+  "ORD-10003": {
+    "order_id": "ORD-10003",
+    "product_name": "USB-C Hub",
+    "status": "delivered",
+    "delivery_days_ago": 10,
+    "amount": 59.99,
+    "refunded": false
+  },
+  "ORD-10004": {
+    "order_id": "ORD-10004",
+    "product_name": "Laptop Stand",
+    "status": "shipped",
+    "delivery_days_ago": 1,
+    "amount": 49.99,
+    "refunded": false
+  },
+  "ORD-10005": {
+    "order_id": "ORD-10005",
+    "product_name": "Webcam",
+    "status": "delivered",
+    "delivery_days_ago": 2,
+    "amount": 79.99,
+    "refunded": true
+  },
+  "ORD-10006": {
+    "order_id": "ORD-10006",
+    "product_name": "Bluetooth Speaker",
+    "status": "delivered",
+    "delivery_days_ago": -2,
+    "amount": 89.99,
+    "refunded": false
+  },
+  "ORD-10007": {
+    "order_id": "ORD-10007",
+    "product_name": "Desk Lamp",
+    "status": "delivered",
+    "delivery_days_ago": 7,
+    "amount": 89.99,
+    "refunded": false
+  }
+}
