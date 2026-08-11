@@ -90,7 +90,7 @@ def create_refund_request(order_id: str) -> dict[str, Any]:
         "refund_id": str(uuid.uuid4()),
         "order_id": order_id,
         "status": "pending",
-        "created_at": dt.datetime.now(dt.timezone.utc),
+        "created_at": dt.datetime.now(dt.UTC),
     }
 
     try:

@@ -30,7 +30,7 @@ User message
 
 ## Requirements
 
-- Python 3.10 or newer
+- Python 3.11 or newer
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - PostgreSQL
 - An OpenAI or OpenAI-compatible API key and model
@@ -173,7 +173,7 @@ Released under the MIT License. See `LICENSE`.
 
 ## 环境要求
 
-- Python 3.10 或更高版本
+- Python 3.11 或更高版本
 - 使用 [uv](https://docs.astral.sh/uv/) 管理依赖
 - PostgreSQL
 - OpenAI 或兼容 OpenAI 接口的 API 密钥和模型
