@@ -49,6 +49,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.release-pytest-tmp/
 cover/
 
 # Translations

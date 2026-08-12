@@ -1,0 +1,62 @@
+# Version control and repository metadata
+.git/
+.github/
+.gitattributes
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments, caches, and generated metadata
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.release-pytest-tmp/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local LangGraph and package-manager state
+.langgraph_api/
+.uv-cache/
+
+# Build outputs
+build/
+dist/
+
+# Development-only files
+tests/
+scripts/
+Makefile
+Dockerfile
+.dockerignore
+compose.yaml
+
+# Editors and operating-system files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs and local databases
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# JavaScript dependencies if added locally
+node_modules/

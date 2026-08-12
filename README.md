@@ -2,7 +2,7 @@
 
 A small human-in-the-loop refund assistant built with LangGraph. The agent finds an order, evaluates a deterministic refund policy, asks for confirmation before an automatic refund, and stores refund requests in PostgreSQL.
 
-Version: `0.1.0`
+Version: `0.1.1`
 
 ## Features
 
@@ -87,6 +87,36 @@ uvx --from "langgraph-cli[inmem]" langgraph dev
 
 The graph entry point is configured in `langgraph.json` as `agent.graph:create_graph` through the source file path.
 
+### Run with Docker Compose
+
+Docker Compose starts the Agent Server together with PostgreSQL and Redis. Copy `.env.example` to `.env`, then set `OPENAI_API_KEY`, `OPENAI_MODEL`, `LANGSMITH_API_KEY`, and a URL-safe `POSTGRES_PASSWORD`.
+
+```bash
+docker compose up --build -d
+docker compose ps
+docker compose logs -f langgraph-api
+```
+
+The API is available at `http://127.0.0.1:8000`. Check it with:
+
+```bash
+curl http://127.0.0.1:8000/ok
+```
+
+Compose supplies `DATABASE_URI`, `POSTGRES_URI`, and `REDIS_URI` inside the API container. PostgreSQL is initialized from `scripts/init_db.sql` only when the `postgres-data` volume is created for the first time.
+
+Stop the services without deleting database data:
+
+```bash
+docker compose down
+```
+
+To also delete the local PostgreSQL data volume and initialize a fresh database on the next start:
+
+```bash
+docker compose down -v
+```
+
 ## Demonstration orders
 
 The bundled data is intended only for local demonstration and tests.
@@ -116,6 +146,8 @@ The integration tests replace the model detector with an offline fake and do not
 ```text
 .
 |-- .github/workflows/ci.yml
+|-- compose.yaml
+|-- Dockerfile
 |-- scripts/init_db.sql
 |-- src/agent/
 |   |-- data/orders.json
@@ -145,7 +177,7 @@ Released under the MIT License. See `LICENSE`.
 
 这是一个使用 LangGraph 构建、带人工确认环节的小型退款助手。它可以查询订单、执行确定性的退款规则、在自动退款前请求用户确认，并把退款申请保存到 PostgreSQL。
 
-版本：`0.1.0`
+版本：`0.1.1`
 
 ## 功能
 
@@ -224,6 +256,36 @@ uvx --from "langgraph-cli[inmem]" langgraph dev
 
 图入口已在 `langgraph.json` 中配置。
 
+### 使用 Docker Compose 运行
+
+Docker Compose 会同时启动 Agent Server、PostgreSQL 和 Redis。先将 `.env.example` 复制为 `.env`，然后填写 `OPENAI_API_KEY`、`OPENAI_MODEL`、`LANGSMITH_API_KEY` 和一个适合放入 URL 的 `POSTGRES_PASSWORD`。
+
+```bash
+docker compose up --build -d
+docker compose ps
+docker compose logs -f langgraph-api
+```
+
+API 地址为 `http://127.0.0.1:8000`，可以执行以下命令检查：
+
+```bash
+curl http://127.0.0.1:8000/ok
+```
+
+Compose 会自动为 API 容器设置 `DATABASE_URI`、`POSTGRES_URI` 和 `REDIS_URI`。`scripts/init_db.sql` 只会在第一次创建 `postgres-data` 数据卷时执行。
+
+停止服务但保留数据库数据：
+
+```bash
+docker compose down
+```
+
+如果还要删除本地 PostgreSQL 数据，并在下次启动时重新初始化：
+
+```bash
+docker compose down -v
+```
+
 ## 演示订单
 
 以下数据仅用于本地演示和测试：
@@ -253,6 +315,8 @@ uv build
 ```text
 .
 |-- .github/workflows/ci.yml
+|-- compose.yaml
+|-- Dockerfile
 |-- scripts/init_db.sql
 |-- src/agent/
 |   |-- data/orders.json
