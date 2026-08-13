@@ -6,7 +6,7 @@ FROM langchain/langgraph-api:3.11-wolfi
 
 LABEL org.opencontainers.image.title="LangGraph Refund Agent" \
       org.opencontainers.image.description="Human-in-the-loop refund assistant built with LangGraph" \
-      org.opencontainers.image.version="0.1.1" \
+      org.opencontainers.image.version="0.2.0" \
       org.opencontainers.image.authors="duxingru" \
       org.opencontainers.image.licenses="MIT"
 

@@ -32,7 +32,7 @@ services:
       retries: 10
 
   langgraph-api:
-    image: langgraph-refund-agent:0.1.1
+    image: langgraph-refund-agent:0.2.0
     build:
       context: .
       dockerfile: Dockerfile

@@ -1,31 +1,40 @@
 # LangGraph Refund Agent
 
-A small human-in-the-loop refund assistant built with LangGraph. The agent finds an order, evaluates a deterministic refund policy, asks for confirmation before an automatic refund, and stores refund requests in PostgreSQL.
+A small customer-service assistant built with LangGraph. It classifies refund requests, order inquiries, and complaints; keeps refund decisions deterministic; asks for confirmation before an automatic refund; and stores refund requests in PostgreSQL.
 
-Version: `0.1.1`
+Version: `0.2.0`
 
 ## Features
 
 - Structured order-number detection with an OpenAI-compatible chat model
+- Structured intent routing for refunds, order inquiries, and complaints
+- Concise complaint responses that do not invent order or refund outcomes
 - Deterministic refund-policy checks
 - Human confirmation before an automatic refund is created
 - Manual-review routing for refunds of 100 or more
+- Safe multi-turn order context with explicit-reference checks
 - PostgreSQL persistence with idempotent request creation
 - Offline unit and graph integration tests
 - Bundled demonstration orders with dates relative to the current day
 
-## Refund flow
+## Workflow
 
 ```text
 User message
-    -> detect order number
-    -> find order
-    -> check refund policy
-       -> reject ineligible order
-       -> route large refund to customer service
-       -> ask for user confirmation
-          -> create one PostgreSQL refund request
-          -> cancel
+    -> classify intent
+       -> complaint
+          -> return a concise customer-service response
+       -> order inquiry
+          -> detect and find the order
+          -> return order status and product information
+       -> refund request
+          -> detect and find the order
+          -> check deterministic refund policy
+             -> reject ineligible order
+             -> route large refund to customer service
+             -> ask for user confirmation
+                -> create one PostgreSQL refund request
+                -> cancel
 ```
 
 ## Requirements
@@ -57,7 +66,7 @@ On PowerShell:
 Copy-Item .env.example .env
 ```
 
-Fill in at least `OPENAI_API_KEY`, `OPENAI_MODEL`, and the PostgreSQL settings. `OPENAI_BASE_URL` can remain empty when the official OpenAI API is used.
+Fill in at least `OPENAI_API_KEY`, `OPENAI_MODEL`, and the PostgreSQL settings. `OPENAI_BASE_URL` can remain empty when the official OpenAI API is used. `CUSTOMER_SERVICE_CONTACT` optionally controls the contact text shown for manual review.
 
 You may configure PostgreSQL with one connection string:
 
@@ -139,7 +148,7 @@ uv run ruff check .
 uv build
 ```
 
-The integration tests replace the model detector with an offline fake and do not connect to PostgreSQL. No API key or database is required to run the test suite.
+The integration tests replace the intent router, order detector, and complaint model with offline fakes and do not connect to PostgreSQL. No API key or database is required to run the test suite.
 
 ## Project layout
 
@@ -175,32 +184,41 @@ Released under the MIT License. See `LICENSE`.
 
 # LangGraph 退款 Agent
 
-这是一个使用 LangGraph 构建、带人工确认环节的小型退款助手。它可以查询订单、执行确定性的退款规则、在自动退款前请求用户确认，并把退款申请保存到 PostgreSQL。
+这是一个使用 LangGraph 构建的小型客服助手。它可以识别退款申请、订单查询和投诉，使用确定性规则判断退款资格，在自动退款前请求用户确认，并把退款申请保存到 PostgreSQL。
 
-版本：`0.1.1`
+版本：`0.2.0`
 
 ## 功能
 
 - 使用兼容 OpenAI 接口的聊天模型识别订单号
+- 使用结构化输出区分退款申请、订单查询和投诉
+- 针对投诉生成简洁回复，但不会虚构订单或退款结果
 - 使用确定性规则检查退款资格
 - 创建自动退款申请前要求用户确认
 - 金额大于或等于 100 时转人工审核
+- 仅在用户明确指代上一订单时复用多轮订单上下文
 - 使用 PostgreSQL 持久化，并保证同一订单不会重复创建退款申请
 - 包含离线单元测试和图集成测试
 - 演示订单使用相对日期，不会随着时间推移全部失效
 
-## 退款流程
+## 工作流
 
 ```text
 用户消息
-    -> 识别订单号
-    -> 查询订单
-    -> 检查退款规则
-       -> 拒绝不符合条件的订单
-       -> 大额退款转客服人工处理
-       -> 请求用户确认
-          -> 在 PostgreSQL 中创建一条退款申请
-          -> 取消退款
+    -> 识别意图
+       -> 投诉
+          -> 返回简洁的客服回复
+       -> 订单查询
+          -> 识别并查询订单
+          -> 返回订单状态和商品信息
+       -> 退款申请
+          -> 识别并查询订单
+          -> 检查确定性退款规则
+             -> 拒绝不符合条件的订单
+             -> 大额退款转客服人工处理
+             -> 请求用户确认
+                -> 在 PostgreSQL 中创建一条退款申请
+                -> 取消退款
 ```
 
 ## 环境要求
@@ -226,7 +244,7 @@ uv sync --extra dev
 Copy-Item .env.example .env
 ```
 
-至少填写 `OPENAI_API_KEY`、`OPENAI_MODEL` 和 PostgreSQL 配置。使用 OpenAI 官方接口时，`OPENAI_BASE_URL` 可以留空。
+至少填写 `OPENAI_API_KEY`、`OPENAI_MODEL` 和 PostgreSQL 配置。使用 OpenAI 官方接口时，`OPENAI_BASE_URL` 可以留空。`CUSTOMER_SERVICE_CONTACT` 可以用来设置转人工审核时显示的联系方式。
 
 可以直接设置完整的 PostgreSQL 连接地址：
 
@@ -308,7 +326,7 @@ uv run ruff check .
 uv build
 ```
 
-集成测试会用离线实现替换模型检测器，而且不会连接 PostgreSQL，因此运行测试不需要 API 密钥或数据库。
+集成测试会用离线实现替换意图路由、订单号识别和投诉回复模型，而且不会连接 PostgreSQL，因此运行测试不需要 API 密钥或数据库。
 
 ## 项目结构
 
