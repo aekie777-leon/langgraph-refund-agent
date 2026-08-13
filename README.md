@@ -2,7 +2,7 @@
 
 A small customer-service assistant built with LangGraph. It classifies refund requests, order inquiries, and complaints; keeps refund decisions deterministic; asks for confirmation before an automatic refund; and stores refund requests in PostgreSQL.
 
-Version: `0.2.0`
+Version: `0.2.1`
 
 ## Features
 
@@ -159,14 +159,29 @@ The integration tests replace the intent router, order detector, and complaint m
 |-- Dockerfile
 |-- scripts/init_db.sql
 |-- src/agent/
-|   |-- data/orders.json
+|   |-- nodes/
+|   |   |-- complaints.py
+|   |   |-- intent.py
+|   |   |-- orders.py
+|   |   `-- refunds.py
 |   |-- tools/
-|   `-- graph.py
+|   |-- data/orders.json
+|   |-- graph.py
+|   |-- models.py
+|   |-- order_context.py
+|   |-- prompts.py
+|   |-- routing.py
+|   |-- schemas.py
+|   `-- state.py
 |-- tests/
+|   |-- integration_tests/
+|   `-- unit_tests/
 |-- .env.example
 |-- langgraph.json
 `-- pyproject.toml
 ```
+
+`graph.py` is intentionally limited to workflow assembly. Prompts, model factories, state, conditional routing, deterministic order context, and domain nodes live in separate modules so each concern can be reviewed and tested independently.
 
 ## Security and production notes
 
@@ -186,7 +201,7 @@ Released under the MIT License. See `LICENSE`.
 
 这是一个使用 LangGraph 构建的小型客服助手。它可以识别退款申请、订单查询和投诉，使用确定性规则判断退款资格，在自动退款前请求用户确认，并把退款申请保存到 PostgreSQL。
 
-版本：`0.2.0`
+版本：`0.2.1`
 
 ## 功能
 
@@ -337,14 +352,29 @@ uv build
 |-- Dockerfile
 |-- scripts/init_db.sql
 |-- src/agent/
-|   |-- data/orders.json
+|   |-- nodes/
+|   |   |-- complaints.py
+|   |   |-- intent.py
+|   |   |-- orders.py
+|   |   `-- refunds.py
 |   |-- tools/
-|   `-- graph.py
+|   |-- data/orders.json
+|   |-- graph.py
+|   |-- models.py
+|   |-- order_context.py
+|   |-- prompts.py
+|   |-- routing.py
+|   |-- schemas.py
+|   `-- state.py
 |-- tests/
+|   |-- integration_tests/
+|   `-- unit_tests/
 |-- .env.example
 |-- langgraph.json
 `-- pyproject.toml
 ```
+
+`graph.py` 只负责组装工作流。提示词、模型工厂、状态、条件路由、确定性订单上下文和各业务节点分别放在独立模块中，便于单独审查和测试。
 
 ## 安全与生产环境说明
 

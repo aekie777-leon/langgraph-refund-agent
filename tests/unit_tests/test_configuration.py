@@ -4,13 +4,15 @@ import pytest
 from langgraph.pregel import Pregel
 
 from agent import graph as graph_module
+from agent import models
+from agent.schemas import OrderDetection, Route
 
 
 class FakeOrderDetector:
     """Return a fixed structured-output result without calling an API."""
 
     async def ainvoke(self, _messages):
-        return graph_module.OrderDetection(
+        return OrderDetection(
             has_order_id=True,
             order_id="ORD-10001",
         )
@@ -20,18 +22,31 @@ class FakeRouter:
     """Return a fixed routing result without calling an API."""
 
     async def ainvoke(self, _messages):
-        return graph_module.Route(step="refund_request")
+        return Route(step="refund_request")
 
 
 def test_create_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        graph_module,
-        "_get_order_detector",
+        models,
+        "get_order_detector",
         lambda: FakeOrderDetector(),
     )
-    monkeypatch.setattr(graph_module, "_router", lambda: FakeRouter())
+    monkeypatch.setattr(models, "get_router", lambda: FakeRouter())
 
-    assert isinstance(graph_module.create_graph(), Pregel)
+    graph = graph_module.create_graph()
+
+    assert isinstance(graph, Pregel)
+    assert {
+        "llm_call_router",
+        "detect_order",
+        "search_node",
+        "check_refund_eligibility",
+        "order_response",
+        "approval_node",
+        "proceed",
+        "cancel",
+        "handle_complaint",
+    }.issubset(graph.get_graph().nodes)
 
 
 def test_model_configuration_is_checked_lazily(
@@ -41,18 +56,4 @@ def test_model_configuration_is_checked_lazily(
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY, OPENAI_MODEL"):
-        graph_module._get_order_detector()
-
-
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("Please refund this order.", True),
-        ("Return it, please.", True),
-        ("请退刚才的订单。", True),
-        ("I want to refund another order.", False),
-        ("Refund ORD-1234.", False),
-    ],
-)
-def test_previous_order_reference_detection(text: str, expected: bool) -> None:
-    assert graph_module._references_previous_order(text) is expected
+        models.get_order_detector()

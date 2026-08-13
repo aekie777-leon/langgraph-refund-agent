@@ -6,6 +6,8 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent import graph as graph_module
+from agent import models
+from agent.schemas import OrderDetection, Route
 
 pytestmark = pytest.mark.anyio
 
@@ -16,7 +18,7 @@ class FakeOrderDetector:
     async def ainvoke(self, messages):
         text = messages[-1].content
         match = re.search(r"ORD-\d{5}", text, flags=re.IGNORECASE)
-        return graph_module.OrderDetection(
+        return OrderDetection(
             has_order_id=match is not None,
             order_id=match.group(0) if match else None,
         )
@@ -33,7 +35,7 @@ class FakeRouter:
             step = "order_inquiry"
         else:
             step = "refund_request"
-        return graph_module.Route(step=step)
+        return Route(step=step)
 
 
 class FakeComplaintModel:
@@ -48,12 +50,12 @@ class FakeComplaintModel:
 @pytest.fixture
 def refund_graph(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
-        graph_module,
-        "_get_order_detector",
+        models,
+        "get_order_detector",
         lambda: FakeOrderDetector(),
     )
-    monkeypatch.setattr(graph_module, "_router", lambda: FakeRouter())
-    monkeypatch.setattr(graph_module, "_get_llm", lambda: FakeComplaintModel())
+    monkeypatch.setattr(models, "get_router", lambda: FakeRouter())
+    monkeypatch.setattr(models, "get_llm", lambda: FakeComplaintModel())
     return graph_module.create_graph()
 
 
