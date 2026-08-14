@@ -1,0 +1,319 @@
+{
+  "schema_version": 1,
+  "normalization": {
+    "unicode_form": "NFKC",
+    "casefold": true,
+    "collapse_whitespace": true,
+    "normalize_apostrophes": true
+  },
+  "hard_critical": [
+    {
+      "id": "hard-self-harm-en-001",
+      "pattern": "i am going to kill myself",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "self_harm",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-self-harm-en-002",
+      "pattern": "i am going to end my life",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "self_harm",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-self-harm-zh-001",
+      "pattern": "我要自杀",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "self_harm",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-self-harm-zh-002",
+      "pattern": "我现在就去死",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "self_harm",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-violence-en-001",
+      "pattern": "i will kill you",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "violence",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-violence-en-002",
+      "pattern": "i am going to attack your staff",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "violence",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-violence-zh-001",
+      "pattern": "我要杀了你",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "violence",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-violence-zh-002",
+      "pattern": "我要袭击你们的员工",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "violence",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-legal-en-001",
+      "pattern": "i am filing a lawsuit against your company",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "legal",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-legal-zh-001",
+      "pattern": "我要起诉你们公司",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "legal",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-regulatory-en-001",
+      "pattern": "i have reported your company to the regulator",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "regulatory",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-regulatory-zh-001",
+      "pattern": "我已经向市场监管局举报你们",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "regulatory",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-reputation-en-001",
+      "pattern": "i will send this story to the media",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "reputation",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    },
+    {
+      "id": "hard-reputation-zh-001",
+      "pattern": "我要把这件事曝光给媒体",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "reputation",
+      "severity": "critical",
+      "rule_type": "hard_critical"
+    }
+  ],
+  "risk_signals": [
+    {
+      "id": "signal-self-harm-en-001",
+      "pattern": "i can't go on like this",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "self_harm",
+      "severity": "high",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-self-harm-en-002",
+      "pattern": "i feel like giving up on everything",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "self_harm",
+      "severity": "high",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-self-harm-zh-001",
+      "pattern": "我活不下去了",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "self_harm",
+      "severity": "high",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-self-harm-zh-002",
+      "pattern": "我不想活了",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "self_harm",
+      "severity": "high",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-violence-en-001",
+      "pattern": "you will regret this",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "violence",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-violence-en-002",
+      "pattern": "someone is going to get hurt",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "violence",
+      "severity": "high",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-violence-zh-001",
+      "pattern": "你们等着瞧",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "violence",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-violence-zh-002",
+      "pattern": "小心有人受伤",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "violence",
+      "severity": "high",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-legal-en-001",
+      "pattern": "i need to speak to my lawyer",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "legal",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-legal-en-002",
+      "pattern": "you will hear from my lawyer",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "legal",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-legal-zh-001",
+      "pattern": "我要找律师",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "legal",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-legal-zh-002",
+      "pattern": "等着收律师函",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "legal",
+      "severity": "high",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-regulatory-en-001",
+      "pattern": "i will contact consumer protection",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "regulatory",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-regulatory-en-002",
+      "pattern": "i am considering a formal complaint",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "regulatory",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-regulatory-zh-001",
+      "pattern": "我要向消费者协会投诉",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "regulatory",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-regulatory-zh-002",
+      "pattern": "我考虑正式投诉",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "regulatory",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-reputation-en-001",
+      "pattern": "i may post this online",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "reputation",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-reputation-en-002",
+      "pattern": "i am considering contacting the press",
+      "match_type": "phrase",
+      "language": "en",
+      "category": "reputation",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-reputation-zh-001",
+      "pattern": "我可能会发到网上",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "reputation",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    },
+    {
+      "id": "signal-reputation-zh-002",
+      "pattern": "我考虑联系媒体",
+      "match_type": "phrase",
+      "language": "zh",
+      "category": "reputation",
+      "severity": "medium",
+      "rule_type": "risk_signal"
+    }
+  ]
+}

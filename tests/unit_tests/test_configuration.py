@@ -5,7 +5,7 @@ from langgraph.pregel import Pregel
 
 from agent import graph as graph_module
 from agent import models
-from agent.schemas import OrderDetection, Route
+from agent.schemas import OrderDetection, Route, SemanticRiskDetection
 
 
 class FakeOrderDetector:
@@ -25,6 +25,17 @@ class FakeRouter:
         return Route(step="refund_request")
 
 
+class FakeRiskClassifier:
+    """Return a fixed semantic-risk result without calling an API."""
+
+    async def ainvoke(self, _messages):
+        return SemanticRiskDetection(
+            risk_level="none",
+            categories=[],
+            reason="No semantic risk is present.",
+        )
+
+
 def test_create_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         models,
@@ -32,6 +43,11 @@ def test_create_graph(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda: FakeOrderDetector(),
     )
     monkeypatch.setattr(models, "get_router", lambda: FakeRouter())
+    monkeypatch.setattr(
+        models,
+        "get_risk_classifier",
+        lambda: FakeRiskClassifier(),
+    )
 
     graph = graph_module.create_graph()
 
@@ -46,6 +62,11 @@ def test_create_graph(monkeypatch: pytest.MonkeyPatch) -> None:
         "proceed",
         "cancel",
         "handle_complaint",
+        "check_risk_rules",
+        "classify_semantic_risk",
+        "confirm_order_priority",
+        "handle_noncritical_risk",
+        "handle_critical_risk",
     }.issubset(graph.get_graph().nodes)
 
 

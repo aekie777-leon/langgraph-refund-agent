@@ -3,18 +3,47 @@
 from agent.state import RefundState
 
 
-def route_by_intent(state: RefundState) -> str:
-    """Route the workflow based on the classified user intent."""
+def route_after_risk_rules(state: RefundState) -> str:
+    """Route hard-critical rule matches before semantic classification."""
+    if state.get("risk_hard_critical"):
+        return "critical_risk"
+    return "semantic_risk"
+
+
+def route_after_semantic_risk(state: RefundState) -> str:
+    """Route the workflow according to semantic risk severity."""
+    risk_level = state.get("semantic_risk_level")
+
+    if risk_level in ("high", "critical"):
+        return "critical_risk"
+    if risk_level in ("none", "low", "medium"):
+        return "intent"
+
+    raise ValueError(f"Unexpected semantic risk level: {risk_level!r}")
+
+
+def route_by_intent_and_risk(state: RefundState) -> str:
+    """Route by business intent while preserving non-critical risk context."""
     decision = state.get("decision")
+    risk_level = state.get("semantic_risk_level")
 
     if decision is None:
         return "END"
     if decision in ("refund_request", "order_inquiry"):
-        return "order_query"
+        if risk_level in ("low", "medium"):
+            return "confirm_order_priority"
+        if risk_level == "none":
+            return "order_query"
     if decision == "complaint":
-        return "complaint"
+        if risk_level in ("low", "medium"):
+            return "noncritical_risk"
+        if risk_level == "none":
+            return "complaint"
 
-    raise ValueError(f"Unexpected intent decision: {decision}")
+    raise ValueError(
+        "Unexpected intent/risk combination: "
+        f"decision={decision!r}, risk_level={risk_level!r}"
+    )
 
 
 def route_after_detection(state: RefundState) -> str:

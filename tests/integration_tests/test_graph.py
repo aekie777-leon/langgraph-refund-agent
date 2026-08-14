@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from agent import graph as graph_module
 from agent import models
-from agent.schemas import OrderDetection, Route
+from agent.schemas import OrderDetection, Route, SemanticRiskDetection
 
 pytestmark = pytest.mark.anyio
 
@@ -38,6 +38,36 @@ class FakeRouter:
         return Route(step=step)
 
 
+class FakeRiskClassifier:
+    """Classify test risk phrases without making a network call."""
+
+    async def ainvoke(self, messages):
+        text = messages[-1].content.lower()
+        if "immediate semantic danger" in text:
+            return SemanticRiskDetection(
+                risk_level="high",
+                categories=["violence"],
+                reason="The test message represents a serious semantic risk.",
+            )
+        if "consumer protection" in text or "formal complaint" in text:
+            return SemanticRiskDetection(
+                risk_level="medium",
+                categories=["regulatory"],
+                reason="The user is considering a regulatory complaint.",
+            )
+        if "head against the wall" in text:
+            return SemanticRiskDetection(
+                risk_level="medium",
+                categories=["self_harm"],
+                reason="The user uses ambiguous self-harm language.",
+            )
+        return SemanticRiskDetection(
+            risk_level="none",
+            categories=[],
+            reason="No semantic risk is present.",
+        )
+
+
 class FakeComplaintModel:
     """Return a fixed complaint response without making a network call."""
 
@@ -55,6 +85,11 @@ def refund_graph(monkeypatch: pytest.MonkeyPatch):
         lambda: FakeOrderDetector(),
     )
     monkeypatch.setattr(models, "get_router", lambda: FakeRouter())
+    monkeypatch.setattr(
+        models,
+        "get_risk_classifier",
+        lambda: FakeRiskClassifier(),
+    )
     monkeypatch.setattr(models, "get_llm", lambda: FakeComplaintModel())
     return graph_module.create_graph()
 
@@ -191,3 +226,99 @@ async def test_graph_clears_previous_refund_state_for_a_complaint(
     assert result["eligible"] is False
     assert result["requires_manual_review"] is False
     assert result["reason"] == ""
+
+
+async def test_graph_routes_hard_critical_rules_before_semantic_risk(
+    refund_graph,
+) -> None:
+    result = await refund_graph.ainvoke(
+        {"messages": [HumanMessage(content="I will kill you.")]}
+    )
+
+    assert result["risk_hard_critical"] is True
+    assert result["risk_requires_human_review"] is True
+    assert result["semantic_risk_level"] is None
+    assert result["decision"] is None
+    assert "urgent safety concern" in result["messages"][-1].content
+
+
+async def test_graph_routes_semantic_high_risk_to_critical_handling(
+    refund_graph,
+) -> None:
+    result = await refund_graph.ainvoke(
+        {"messages": [HumanMessage(content="This is immediate semantic danger.")]}
+    )
+
+    assert result["risk_hard_critical"] is False
+    assert result["semantic_risk_level"] == "high"
+    assert result["semantic_risk_categories"] == ["violence"]
+    assert result["risk_requires_human_review"] is True
+    assert result["decision"] is None
+
+
+async def test_graph_asks_before_processing_a_risky_refund_request(
+    refund_graph,
+) -> None:
+    result = await refund_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "Please refund ORD-10001 or I will contact consumer "
+                        "protection."
+                    )
+                )
+            ]
+        }
+    )
+
+    assert result["semantic_risk_level"] == "medium"
+    assert result["semantic_risk_categories"] == ["regulatory"]
+    assert result["decision"] == "refund_request"
+    assert result["__interrupt__"]
+    assert (
+        result["__interrupt__"][0].value["type"]
+        == "order_priority_confirmation"
+    )
+
+
+async def test_medium_self_harm_language_does_not_hide_an_order_inquiry(
+    refund_graph,
+) -> None:
+    result = await refund_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "I want to bang my head against the wall. "
+                        "Where is ORD-10001?"
+                    )
+                )
+            ]
+        }
+    )
+
+    assert result["risk_hard_critical"] is False
+    assert result["semantic_risk_level"] == "medium"
+    assert result["semantic_risk_categories"] == ["self_harm"]
+    assert result["decision"] == "order_inquiry"
+    assert result["__interrupt__"]
+
+
+async def test_medium_risk_complaint_uses_noncritical_risk_response(
+    refund_graph,
+) -> None:
+    result = await refund_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content="I am considering a formal complaint about delivery."
+                )
+            ]
+        }
+    )
+
+    assert result["semantic_risk_level"] == "medium"
+    assert result["decision"] == "complaint"
+    assert "understand your concern" in result["messages"][-1].content
+    assert "__interrupt__" not in result

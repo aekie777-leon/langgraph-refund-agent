@@ -6,7 +6,7 @@ from typing import Any
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
-from agent.schemas import OrderDetection, Route
+from agent.schemas import OrderDetection, Route, SemanticRiskDetection
 
 load_dotenv()
 
@@ -45,3 +45,8 @@ def get_order_detector() -> Any:
 def get_router() -> Any:
     """Create the structured-output model used for intent routing."""
     return get_llm().with_structured_output(Route)
+
+
+def get_risk_classifier() -> Any:
+    """Create the structured-output semantic risk classifier."""
+    return get_llm().with_structured_output(SemanticRiskDetection)

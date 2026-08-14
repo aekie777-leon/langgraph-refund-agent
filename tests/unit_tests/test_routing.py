@@ -6,26 +6,94 @@ from agent.routing import (
     route_after_detection,
     route_after_order_lookup,
     route_after_policy,
-    route_by_intent,
+    route_after_risk_rules,
+    route_after_semantic_risk,
+    route_by_intent_and_risk,
 )
 
 
 @pytest.mark.parametrize(
-    ("decision", "expected"),
+    ("decision", "risk_level", "expected"),
     [
-        ("refund_request", "order_query"),
-        ("order_inquiry", "order_query"),
-        ("complaint", "complaint"),
-        (None, "END"),
+        ("refund_request", "none", "order_query"),
+        ("order_inquiry", "none", "order_query"),
+        ("complaint", "none", "complaint"),
+        ("refund_request", "low", "confirm_order_priority"),
+        ("order_inquiry", "medium", "confirm_order_priority"),
+        ("complaint", "low", "noncritical_risk"),
+        ("complaint", "medium", "noncritical_risk"),
+        (None, "none", "END"),
     ],
 )
-def test_route_by_intent(decision, expected: str) -> None:
-    assert route_by_intent({"decision": decision}) == expected
+def test_route_by_intent_and_risk(
+    decision,
+    risk_level,
+    expected: str,
+) -> None:
+    assert (
+        route_by_intent_and_risk(
+            {
+                "decision": decision,
+                "semantic_risk_level": risk_level,
+            }
+        )
+        == expected
+    )
 
 
 def test_route_by_intent_rejects_an_unknown_value() -> None:
-    with pytest.raises(ValueError, match="Unexpected intent decision"):
-        route_by_intent({"decision": "unknown"})  # type: ignore[typeddict-item]
+    with pytest.raises(ValueError, match="Unexpected intent/risk combination"):
+        route_by_intent_and_risk(
+            {
+                "decision": "unknown",  # type: ignore[typeddict-item]
+                "semantic_risk_level": "none",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("hard_critical", "expected"),
+    [(True, "critical_risk"), (False, "semantic_risk")],
+)
+def test_route_after_risk_rules(
+    hard_critical: bool,
+    expected: str,
+) -> None:
+    assert route_after_risk_rules({"risk_hard_critical": hard_critical}) == expected
+
+
+@pytest.mark.parametrize(
+    ("risk_level", "expected"),
+    [
+        ("none", "intent"),
+        ("low", "intent"),
+        ("medium", "intent"),
+        ("high", "critical_risk"),
+        ("critical", "critical_risk"),
+    ],
+)
+def test_route_after_semantic_risk(risk_level, expected: str) -> None:
+    assert (
+        route_after_semantic_risk({"semantic_risk_level": risk_level}) == expected
+    )
+
+
+def test_route_after_semantic_risk_rejects_a_missing_level() -> None:
+    with pytest.raises(ValueError, match="Unexpected semantic risk level"):
+        route_after_semantic_risk({})
+
+
+def test_medium_self_harm_order_request_still_offers_order_help() -> None:
+    assert (
+        route_by_intent_and_risk(
+            {
+                "decision": "order_inquiry",
+                "semantic_risk_level": "medium",
+                "semantic_risk_categories": ["self_harm"],
+            }
+        )
+        == "confirm_order_priority"
+    )
 
 
 @pytest.mark.parametrize(

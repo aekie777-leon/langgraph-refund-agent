@@ -1,7 +1,7 @@
 [project]
 name = "langgraph-refund-agent"
-version = "0.2.1"
-description = "A human-in-the-loop refund assistant built with LangGraph."
+version = "0.3.0"
+description = "A risk-aware, human-in-the-loop customer-service assistant built with LangGraph."
 authors = [{ name = "duxingru" }]
 readme = "README.md"
 license = "MIT"

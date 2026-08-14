@@ -1,13 +1,26 @@
 # LangGraph Refund Agent
 
-A small customer-service assistant built with LangGraph. It classifies refund requests, order inquiries, and complaints; keeps refund decisions deterministic; asks for confirmation before an automatic refund; and stores refund requests in PostgreSQL.
+A small, risk-aware customer-service assistant built with LangGraph. It classifies refund requests, order inquiries, and complaints; performs deterministic and semantic risk checks; keeps refund decisions deterministic; asks for confirmation before an automatic refund; and stores refund requests in PostgreSQL.
 
-Version: `0.2.1`
+Version: `0.3.0`
+
+## What's new in v0.3.0
+
+- A conservative bilingual JSON rule set for English and Chinese risk expressions
+- Deterministic separation between hard-critical matches and contextual risk signals
+- Structured LLM semantic classification across five severity levels and six categories
+- Safety-first handling for high and critical risks without weakening the existing refund policy
+- An interrupt-based choice when a low- or medium-risk message also contains an actionable order request
+- Dedicated risk nodes, routing helpers, state fields, prompts, and offline tests
 
 ## Features
 
 - Structured order-number detection with an OpenAI-compatible chat model
 - Structured intent routing for refunds, order inquiries, and complaints
+- Deterministic bilingual risk-rule matching before any semantic risk classification
+- Structured semantic risk classification for self-harm, violence, legal, regulatory, reputation, and other risks
+- Hard-critical risk handling that cannot be downgraded by the semantic classifier
+- Order-priority confirmation when non-critical risk and an order request appear together
 - Concise complaint responses that do not invent order or refund outcomes
 - Deterministic refund-policy checks
 - Human confirmation before an automatic refund is created
@@ -21,21 +34,70 @@ Version: `0.2.1`
 
 ```text
 User message
-    -> classify intent
-       -> complaint
-          -> return a concise customer-service response
-       -> order inquiry
-          -> detect and find the order
-          -> return order status and product information
-       -> refund request
-          -> detect and find the order
-          -> check deterministic refund policy
-             -> reject ineligible order
-             -> route large refund to customer service
-             -> ask for user confirmation
-                -> create one PostgreSQL refund request
-                -> cancel
+    -> check deterministic risk rules
+       -> hard critical
+          -> return a safety or human-review response
+       -> otherwise classify semantic risk
+          -> high / critical
+             -> return a safety or human-review response
+          -> none / low / medium
+             -> classify business intent
+                -> complaint
+                   -> normal complaint response or non-critical risk response
+                -> order inquiry / refund request
+                   -> low / medium risk
+                      -> ask whether to handle the order now
+                         -> continue with the order
+                         -> continue with the risk concern
+                   -> no risk
+                      -> continue with the order
+                   -> detect and find the order
+                   -> order inquiry: return order information
+                   -> refund request: check deterministic refund policy
+                      -> reject an ineligible order
+                      -> route a large refund to customer service
+                      -> ask for refund confirmation
+                         -> create one PostgreSQL refund request
+                         -> cancel
 ```
+
+## Risk handling
+
+Risk rules live in `src/agent/data/risk_rules.json`. Each entry contains an ID, matching pattern, language, category, severity, and rule type. The matcher normalizes Unicode, apostrophes, letter case, and whitespace before applying conservative literal phrase matching.
+
+- `hard_critical` rules represent explicit high-confidence danger. A match bypasses the semantic classifier and cannot be downgraded by the LLM.
+- `risk_signals` provide context only. A signal is passed to the semantic classifier and does not independently decide the final severity or whether human handling is required.
+- Messages without a hard-critical match are classified as `none`, `low`, `medium`, `high`, or `critical` using structured model output.
+- A high or critical result ends the business flow with an appropriate safety or human-review response.
+- A low or medium result may continue through business-intent routing. When an order inquiry or refund request is also present, the graph pauses and asks the user which concern to handle.
+
+The rule matcher does not call an LLM, route the graph, or make a final human-review decision.
+
+### Resume an order-priority interrupt
+
+When a run returns an `order_priority_confirmation` interrupt, resume the same thread rather than sending a new user message. To continue with the order, send:
+
+```json
+{
+  "assistant_id": "agent",
+  "command": {
+    "resume": "handle_order"
+  }
+}
+```
+
+To continue with the risk concern instead, use:
+
+```json
+{
+  "assistant_id": "agent",
+  "command": {
+    "resume": "continue_risk"
+  }
+}
+```
+
+Use the boolean values `true` or `false` when resuming the separate refund-approval interrupt.
 
 ## Requirements
 
@@ -145,10 +207,11 @@ The bundled data is intended only for local demonstration and tests.
 ```bash
 uv run pytest
 uv run ruff check .
+uv run mypy src
 uv build
 ```
 
-The integration tests replace the intent router, order detector, and complaint model with offline fakes and do not connect to PostgreSQL. No API key or database is required to run the test suite.
+The integration tests replace the intent router, order detector, semantic risk classifier, and response model with offline fakes and do not connect to PostgreSQL. No API key or database is required to run the test suite.
 
 ## Project layout
 
@@ -163,13 +226,17 @@ The integration tests replace the intent router, order detector, and complaint m
 |   |   |-- complaints.py
 |   |   |-- intent.py
 |   |   |-- orders.py
-|   |   `-- refunds.py
+|   |   |-- refunds.py
+|   |   `-- risk.py
 |   |-- tools/
-|   |-- data/orders.json
+|   |-- data/
+|   |   |-- orders.json
+|   |   `-- risk_rules.json
 |   |-- graph.py
 |   |-- models.py
 |   |-- order_context.py
 |   |-- prompts.py
+|   |-- risk_matcher.py
 |   |-- routing.py
 |   |-- schemas.py
 |   `-- state.py
@@ -190,6 +257,9 @@ The integration tests replace the intent router, order detector, and complaint m
 - A production service must authenticate users and verify that an order belongs to the requesting user.
 - Add authorization, audit logging, monitoring, rate limits, encrypted secret management, and a real order service before production use.
 - Review the refund policy and manual-review threshold with the responsible business and legal teams.
+- `risk_requires_human_review` is currently a workflow state flag and response behavior; it is not connected to a real ticketing or human-queue system.
+- The bundled risk rules are intentionally conservative demonstration data, not a complete safety or compliance vocabulary.
+- Semantic risk classification depends on the configured model and may vary across wording or languages. Validate the policy, prompts, and responses with qualified safety, legal, and compliance reviewers before production use.
 
 ## License
 
@@ -199,14 +269,27 @@ Released under the MIT License. See `LICENSE`.
 
 # LangGraph 退款 Agent
 
-这是一个使用 LangGraph 构建的小型客服助手。它可以识别退款申请、订单查询和投诉，使用确定性规则判断退款资格，在自动退款前请求用户确认，并把退款申请保存到 PostgreSQL。
+这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别退款申请、订单查询和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断退款资格，在自动退款前请求用户确认，并把退款申请保存到 PostgreSQL。
 
-版本：`0.2.1`
+版本：`0.3.0`
+
+## v0.3.0 新增内容
+
+- 增加保守的中英文 JSON 风险规则配置
+- 明确区分 hard critical 硬性高危命中与上下文 risk signal
+- 使用结构化输出完成五级严重程度和六类风险的 LLM 语义分类
+- 高危和严重风险优先进入安全处理，同时保留原有确定性退款规则
+- 当非高危风险与订单请求同时出现时，通过 interrupt 让用户选择优先处理内容
+- 增加独立的风险节点、路由函数、状态字段、提示词和离线测试
 
 ## 功能
 
 - 使用兼容 OpenAI 接口的聊天模型识别订单号
 - 使用结构化输出区分退款申请、订单查询和投诉
+- 在语义分类前执行确定性的中英文风险规则匹配
+- 使用结构化输出分类自伤、暴力、法律、监管、声誉和其他风险
+- hard critical 命中不会被后续 LLM 降级
+- 当非高危风险和订单请求同时出现时询问用户处理优先级
 - 针对投诉生成简洁回复，但不会虚构订单或退款结果
 - 使用确定性规则检查退款资格
 - 创建自动退款申请前要求用户确认
@@ -220,21 +303,70 @@ Released under the MIT License. See `LICENSE`.
 
 ```text
 用户消息
-    -> 识别意图
-       -> 投诉
-          -> 返回简洁的客服回复
-       -> 订单查询
-          -> 识别并查询订单
-          -> 返回订单状态和商品信息
-       -> 退款申请
-          -> 识别并查询订单
-          -> 检查确定性退款规则
-             -> 拒绝不符合条件的订单
-             -> 大额退款转客服人工处理
-             -> 请求用户确认
-                -> 在 PostgreSQL 中创建一条退款申请
-                -> 取消退款
+    -> 检查确定性风险规则
+       -> hard critical
+          -> 返回安全提示或人工审核回复
+       -> 其他情况进入语义风险分类
+          -> high / critical
+             -> 返回安全提示或人工审核回复
+          -> none / low / medium
+             -> 识别业务意图
+                -> 投诉
+                   -> 普通投诉回复或非高危风险回复
+                -> 订单查询 / 退款申请
+                   -> low / medium 风险
+                      -> 询问是否现在处理订单
+                         -> 继续处理订单
+                         -> 继续处理风险问题
+                   -> 无风险
+                      -> 继续处理订单
+                   -> 识别并查询订单
+                   -> 订单查询：返回订单信息
+                   -> 退款申请：检查确定性退款规则
+                      -> 拒绝不符合条件的订单
+                      -> 大额退款转客服人工处理
+                      -> 请求用户确认
+                         -> 在 PostgreSQL 中创建一条退款申请
+                         -> 取消退款
 ```
+
+## 风险处理
+
+风险规则保存在 `src/agent/data/risk_rules.json`。每条规则包含 ID、匹配文本、语言、风险类别、严重程度和规则类型。matcher 会先规范化 Unicode、英文撇号、字母大小写和空白，再进行保守的字面短语匹配。
+
+- `hard_critical` 表示含义明确且置信度高的危险表达。命中后会绕过语义分类器，LLM 不能将其降级。
+- `risk_signals` 只提供上下文提示。signal 会交给语义分类器继续判断，本身不会直接决定最终风险级别或是否转人工。
+- 未命中 hard critical 的消息由结构化模型输出分类为 `none`、`low`、`medium`、`high` 或 `critical`。
+- `high` 和 `critical` 会结束业务流程，并返回相应的安全提示或人工审核回复。
+- `low` 和 `medium` 可以继续识别业务意图。当消息同时包含订单查询或退款请求时，图会暂停并让用户选择要处理的问题。
+
+规则 matcher 不调用 LLM，不包含图路由逻辑，也不直接决定最终是否转人工。
+
+### 恢复订单优先级 interrupt
+
+当运行结果出现 `order_priority_confirmation` interrupt 时，应当恢复同一个 thread，不能发送一条新的用户消息。继续处理订单时发送：
+
+```json
+{
+  "assistant_id": "agent",
+  "command": {
+    "resume": "handle_order"
+  }
+}
+```
+
+如果要继续处理风险问题，则发送：
+
+```json
+{
+  "assistant_id": "agent",
+  "command": {
+    "resume": "continue_risk"
+  }
+}
+```
+
+恢复另一个退款确认 interrupt 时，应使用布尔值 `true` 或 `false`。
 
 ## 环境要求
 
@@ -338,10 +470,11 @@ docker compose down -v
 ```bash
 uv run pytest
 uv run ruff check .
+uv run mypy src
 uv build
 ```
 
-集成测试会用离线实现替换意图路由、订单号识别和投诉回复模型，而且不会连接 PostgreSQL，因此运行测试不需要 API 密钥或数据库。
+集成测试会用离线实现替换意图路由、订单号识别、语义风险分类器和回复模型，而且不会连接 PostgreSQL，因此运行测试不需要 API 密钥或数据库。
 
 ## 项目结构
 
@@ -356,13 +489,17 @@ uv build
 |   |   |-- complaints.py
 |   |   |-- intent.py
 |   |   |-- orders.py
-|   |   `-- refunds.py
+|   |   |-- refunds.py
+|   |   `-- risk.py
 |   |-- tools/
-|   |-- data/orders.json
+|   |-- data/
+|   |   |-- orders.json
+|   |   `-- risk_rules.json
 |   |-- graph.py
 |   |-- models.py
 |   |-- order_context.py
 |   |-- prompts.py
+|   |-- risk_matcher.py
 |   |-- routing.py
 |   |-- schemas.py
 |   `-- state.py
@@ -383,6 +520,9 @@ uv build
 - 生产服务必须验证用户身份，并确认订单确实属于发起请求的用户。
 - 上线前需要补充权限控制、审计日志、监控、限流和加密密钥管理，并接入真实订单服务。
 - 退款规则和人工审核金额阈值需要由相应的业务及法务人员确认。
+- `risk_requires_human_review` 目前只是工作流状态标记和回复行为，尚未连接真实工单或人工队列系统。
+- 内置风险规则是有意保持保守的演示数据，并不是完整的安全或合规词库。
+- 语义风险分类取决于所配置的模型，可能因措辞或语言不同而产生差异。投入生产环境前，应由专业的安全、法务和合规人员验证规则、提示词和回复内容。
 
 ## 许可证
 
