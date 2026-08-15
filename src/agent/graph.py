@@ -1,9 +1,22 @@
 """Build the LangGraph customer-service workflow."""
 
+from collections.abc import Callable
+
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langgraph.graph import END, START, StateGraph
 
 from agent import models
-from agent.nodes.complaints import handle_complaint
+from agent.cases.runtime import get_case_service
+from agent.cases.service import CaseService
+from agent.nodes.cases import build_finalize_case_handoff_node
+from agent.nodes.complaints import (
+    build_formal_complaint_classifier_node,
+    handle_complaint,
+)
+from agent.nodes.handoff import (
+    acknowledge_human_handoff,
+    confirm_human_handoff,
+)
 from agent.nodes.intent import build_intent_router_node
 from agent.nodes.orders import (
     build_order_detection_node,
@@ -25,6 +38,7 @@ from agent.nodes.risk import (
 )
 from agent.routing import (
     route_after_detection,
+    route_after_formal_complaint,
     route_after_order_lookup,
     route_after_policy,
     route_after_risk_rules,
@@ -34,22 +48,27 @@ from agent.routing import (
 from agent.state import RefundState
 
 
-def create_graph():
-    """Build and compile the customer-service workflow."""
-    workflow = StateGraph(RefundState)
+def build_graph(
+    *,
+    case_service_provider: Callable[[], CaseService] = get_case_service,
+):
+    """Build the workflow with an injectable support-case service."""
+    workflow = StateGraph[RefundState, None, RefundState, RefundState](RefundState)
 
     workflow.add_node("check_risk_rules", check_risk_rules)
     workflow.add_node(
         "classify_semantic_risk",
-        build_semantic_risk_classifier_node(models.get_risk_classifier()),
+        RunnableLambda(
+            build_semantic_risk_classifier_node(models.get_risk_classifier())
+        ),
     )
     workflow.add_node(
         "llm_call_router",
-        build_intent_router_node(models.get_router()),
+        RunnableLambda(build_intent_router_node(models.get_router())),
     )
     workflow.add_node(
         "detect_order",
-        build_order_detection_node(models.get_order_detector()),
+        RunnableLambda(build_order_detection_node(models.get_order_detector())),
     )
     workflow.add_node("search_node", search_order_node)
     workflow.add_node(
@@ -57,13 +76,36 @@ def create_graph():
         check_refund_eligibility_node,
     )
     workflow.add_node("order_response", order_response_node)
-    workflow.add_node("approval_node", approval_node)
+    workflow.add_node("approval_node", RunnableLambda(approval_node))
     workflow.add_node("proceed", create_refund_node)
-    workflow.add_node("cancel", cancelled_node)
+    workflow.add_node("cancel", RunnableLambda(cancelled_node))
     workflow.add_node("handle_complaint", handle_complaint)
-    workflow.add_node("confirm_order_priority", confirm_order_priority)
+    workflow.add_node(
+        "classify_formal_complaint",
+        RunnableLambda(
+            build_formal_complaint_classifier_node(
+                models.get_formal_complaint_classifier()
+            )
+        ),
+    )
+    workflow.add_node(
+        "confirm_human_handoff",
+        RunnableLambda(confirm_human_handoff),
+    )
+    workflow.add_node(
+        "acknowledge_human_handoff",
+        RunnableLambda(acknowledge_human_handoff),
+    )
+    workflow.add_node(
+        "confirm_order_priority",
+        RunnableLambda(confirm_order_priority),
+    )
     workflow.add_node("handle_noncritical_risk", handle_noncritical_risk)
     workflow.add_node("handle_critical_risk", handle_critical_risk)
+    workflow.add_node(
+        "finalize_case_handoff",
+        RunnableLambda(build_finalize_case_handoff_node(case_service_provider)),
+    )
 
     workflow.add_edge(START, "check_risk_rules")
     workflow.add_conditional_edges(
@@ -86,17 +128,29 @@ def create_graph():
         "llm_call_router",
         route_by_intent_and_risk,
         {
+            "formal_complaint": "classify_formal_complaint",
+            "confirm_human_handoff": "confirm_human_handoff",
             "confirm_order_priority": "confirm_order_priority",
             "order_query": "detect_order",
+            "finalize": "finalize_case_handoff",
+        },
+    )
+    workflow.add_conditional_edges(
+        "classify_formal_complaint",
+        route_after_formal_complaint,
+        {
+            "confirm_human_handoff": "confirm_human_handoff",
             "noncritical_risk": "handle_noncritical_risk",
             "complaint": "handle_complaint",
-            "END": END,
         },
     )
     workflow.add_conditional_edges(
         "detect_order",
         route_after_detection,
-        {"END": END, "search_node": "search_node"},
+        {
+            "finalize": "finalize_case_handoff",
+            "search_node": "search_node",
+        },
     )
     workflow.add_conditional_edges(
         "search_node",
@@ -104,19 +158,32 @@ def create_graph():
         {
             "order_response": "order_response",
             "check_refund_eligibility": "check_refund_eligibility",
-            "END": END,
+            "finalize": "finalize_case_handoff",
         },
     )
     workflow.add_conditional_edges(
         "check_refund_eligibility",
         route_after_policy,
-        {"END": END, "approval_node": "approval_node"},
+        {
+            "finalize": "finalize_case_handoff",
+            "approval_node": "approval_node",
+        },
     )
-    workflow.add_edge("handle_complaint", END)
-    workflow.add_edge("handle_noncritical_risk", END)
-    workflow.add_edge("handle_critical_risk", END)
-    workflow.add_edge("order_response", END)
-    workflow.add_edge("proceed", END)
-    workflow.add_edge("cancel", END)
+    workflow.add_edge("handle_complaint", "finalize_case_handoff")
+    workflow.add_edge("handle_noncritical_risk", "finalize_case_handoff")
+    workflow.add_edge("handle_critical_risk", "finalize_case_handoff")
+    workflow.add_edge("order_response", "finalize_case_handoff")
+    workflow.add_edge("proceed", "finalize_case_handoff")
+    workflow.add_edge("cancel", "finalize_case_handoff")
+    workflow.add_edge(
+        "acknowledge_human_handoff",
+        "finalize_case_handoff",
+    )
+    workflow.add_edge("finalize_case_handoff", END)
 
     return workflow.compile()
+
+
+def create_graph(_config: RunnableConfig):
+    """Build the production graph for the LangGraph Agent Server."""
+    return build_graph()

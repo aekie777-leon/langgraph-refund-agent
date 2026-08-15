@@ -50,6 +50,11 @@ def test_check_risk_rules_preserves_hard_critical_and_resets_turn_state() -> Non
             "semantic_risk_level": "medium",
             "semantic_risk_categories": ["legal"],
             "risk_order_choice": "handle_order",
+            "human_handoff_requested": True,
+            "human_handoff_confirmed": True,
+            "staff_complaint_severity": "high",
+            "explicit_other_complaint": True,
+            "formal_complaint_reason": "Old complaint result",
         }
     )
 
@@ -62,6 +67,11 @@ def test_check_risk_rules_preserves_hard_critical_and_resets_turn_state() -> Non
     assert result["semantic_risk_level"] is None
     assert result["semantic_risk_categories"] == []
     assert result["risk_order_choice"] is None
+    assert result["human_handoff_requested"] is False
+    assert result["human_handoff_confirmed"] is False
+    assert result["staff_complaint_severity"] is None
+    assert result["explicit_other_complaint"] is False
+    assert result["formal_complaint_reason"] == ""
 
 
 @pytest.mark.anyio
@@ -84,9 +94,7 @@ async def test_semantic_classifier_receives_rule_signal_context() -> None:
     assert result == {
         "semantic_risk_level": "medium",
         "semantic_risk_categories": ["regulatory"],
-        "semantic_risk_reason": (
-            "The user is considering regulatory escalation."
-        ),
+        "semantic_risk_reason": ("The user is considering regulatory escalation."),
     }
     assert "signal-regulatory-en-001" in classifier.messages[1].content
 

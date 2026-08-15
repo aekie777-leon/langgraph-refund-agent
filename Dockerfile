@@ -6,7 +6,7 @@ FROM langchain/langgraph-api:3.11-wolfi
 
 LABEL org.opencontainers.image.title="LangGraph Refund Agent" \
       org.opencontainers.image.description="Risk-aware human-in-the-loop customer-service assistant built with LangGraph" \
-      org.opencontainers.image.version="0.3.0" \
+      org.opencontainers.image.version="0.4.0" \
       org.opencontainers.image.authors="duxingru" \
       org.opencontainers.image.licenses="MIT"
 
@@ -26,6 +26,7 @@ RUN cd /deps/project && \
         -e .
 
 # Register the graph using the same entry point as langgraph.json.
+ENV LANGGRAPH_HTTP='{"app":"/deps/project/src/agent/webapp.py:app"}'
 ENV LANGSERVE_GRAPHS='{"agent":"/deps/project/src/agent/graph.py:create_graph"}'
 
 # Restore the Agent Server package in case an application dependency changed

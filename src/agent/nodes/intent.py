@@ -32,6 +32,9 @@ def build_intent_router_node(router: Any) -> AsyncNode:
         if not isinstance(decision, Route):
             raise TypeError("Router returned an unexpected result")
 
-        return new_turn_state(decision.step)
+        return {
+            **new_turn_state(decision.step),
+            "human_handoff_requested": decision.human_handoff_requested,
+        }
 
     return llm_call_router

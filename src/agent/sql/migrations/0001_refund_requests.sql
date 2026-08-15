@@ -1,7 +1,8 @@
 CREATE TABLE IF NOT EXISTS refund_requests (
     refund_id UUID PRIMARY KEY,
     order_id VARCHAR(50) NOT NULL UNIQUE,
-    status VARCHAR(20) NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+    status VARCHAR(20) NOT NULL
+        CHECK (status IN ('pending', 'approved', 'rejected')),
     created_at TIMESTAMPTZ NOT NULL
 );
 

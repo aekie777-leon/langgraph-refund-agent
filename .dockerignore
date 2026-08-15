@@ -38,7 +38,7 @@ dist/
 
 # Development-only files
 tests/
-scripts/
+AGENTS.md
 Makefile
 Dockerfile
 .dockerignore

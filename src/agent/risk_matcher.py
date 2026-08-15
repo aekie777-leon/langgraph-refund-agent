@@ -155,7 +155,9 @@ def load_risk_rules(path: str | Path | None = None) -> RiskRuleSet:
             raw_json = Path(path).read_text(encoding="utf-8")
         payload = json.loads(raw_json)
     except (OSError, json.JSONDecodeError) as exc:
-        raise RiskRuleConfigError(f"Unable to load risk-rule configuration: {exc}") from exc
+        raise RiskRuleConfigError(
+            f"Unable to load risk-rule configuration: {exc}"
+        ) from exc
 
     root = _require_mapping(payload, "root")
     _reject_unknown_fields(root, _TOP_LEVEL_FIELDS, "root")
@@ -392,6 +394,4 @@ def _reject_unknown_fields(
 ) -> None:
     unknown = sorted(set(value) - allowed)
     if unknown:
-        raise RiskRuleConfigError(
-            f"Unknown fields in {location}: {', '.join(unknown)}"
-        )
+        raise RiskRuleConfigError(f"Unknown fields in {location}: {', '.join(unknown)}")

@@ -1,11 +1,19 @@
 """Tests for graph construction and configuration validation."""
 
+import json
+from pathlib import Path
+
 import pytest
 from langgraph.pregel import Pregel
 
 from agent import graph as graph_module
 from agent import models
-from agent.schemas import OrderDetection, Route, SemanticRiskDetection
+from agent.schemas import (
+    FormalComplaintDetection,
+    OrderDetection,
+    Route,
+    SemanticRiskDetection,
+)
 
 
 class FakeOrderDetector:
@@ -22,7 +30,20 @@ class FakeRouter:
     """Return a fixed routing result without calling an API."""
 
     async def ainvoke(self, _messages):
-        return Route(step="refund_request")
+        return Route(
+            step="refund_request",
+            human_handoff_requested=False,
+        )
+
+
+class FakeFormalComplaintClassifier:
+    """Return an ordinary complaint classification without an API call."""
+
+    async def ainvoke(self, _messages):
+        return FormalComplaintDetection(
+            complaint_kind="ordinary",
+            reason="No formal complaint is present.",
+        )
 
 
 class FakeRiskClassifier:
@@ -36,7 +57,7 @@ class FakeRiskClassifier:
         )
 
 
-def test_create_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         models,
         "get_order_detector",
@@ -45,11 +66,16 @@ def test_create_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(models, "get_router", lambda: FakeRouter())
     monkeypatch.setattr(
         models,
+        "get_formal_complaint_classifier",
+        lambda: FakeFormalComplaintClassifier(),
+    )
+    monkeypatch.setattr(
+        models,
         "get_risk_classifier",
         lambda: FakeRiskClassifier(),
     )
 
-    graph = graph_module.create_graph()
+    graph = graph_module.build_graph()
 
     assert isinstance(graph, Pregel)
     assert {
@@ -62,12 +88,57 @@ def test_create_graph(monkeypatch: pytest.MonkeyPatch) -> None:
         "proceed",
         "cancel",
         "handle_complaint",
+        "classify_formal_complaint",
+        "confirm_human_handoff",
+        "acknowledge_human_handoff",
         "check_risk_rules",
         "classify_semantic_risk",
         "confirm_order_priority",
         "handle_noncritical_risk",
         "handle_critical_risk",
+        "finalize_case_handoff",
     }.issubset(graph.get_graph().nodes)
+
+
+def test_agent_server_factory_accepts_runnable_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        models,
+        "get_order_detector",
+        lambda: FakeOrderDetector(),
+    )
+    monkeypatch.setattr(models, "get_router", lambda: FakeRouter())
+    monkeypatch.setattr(
+        models,
+        "get_formal_complaint_classifier",
+        lambda: FakeFormalComplaintClassifier(),
+    )
+    monkeypatch.setattr(
+        models,
+        "get_risk_classifier",
+        lambda: FakeRiskClassifier(),
+    )
+
+    graph = graph_module.create_graph(
+        {"configurable": {"thread_id": "factory-test-thread"}}
+    )
+
+    assert isinstance(graph, Pregel)
+    assert "finalize_case_handoff" in graph.get_graph().nodes
+
+
+def test_langgraph_uses_the_custom_lifespan_app() -> None:
+    config = json.loads(Path("langgraph.json").read_text(encoding="utf-8"))
+
+    assert config["http"]["app"] == "./src/agent/webapp.py:app"
+
+
+def test_docker_image_registers_the_custom_lifespan_app() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert "ENV LANGGRAPH_HTTP=" in dockerfile
+    assert "/deps/project/src/agent/webapp.py:app" in dockerfile
 
 
 def test_model_configuration_is_checked_lazily(

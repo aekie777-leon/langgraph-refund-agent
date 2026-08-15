@@ -5,7 +5,19 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 from langgraph.graph import MessagesState
 
-from agent.schemas import Intent, SemanticRiskCategory, SemanticRiskLevel
+from agent.cases.models import (
+    CasePriority,
+    CaseServiceAction,
+    CaseStatus,
+    CaseType,
+    HandoffReason,
+)
+from agent.schemas import (
+    Intent,
+    SemanticRiskCategory,
+    SemanticRiskLevel,
+    StaffComplaintSeverity,
+)
 
 
 class RefundState(MessagesState, total=False):
@@ -29,6 +41,17 @@ class RefundState(MessagesState, total=False):
     semantic_risk_reason: str
     risk_order_choice: str | None
     risk_requires_human_review: bool
+    human_handoff_requested: bool
+    human_handoff_confirmed: bool
+    staff_complaint_severity: StaffComplaintSeverity | None
+    explicit_other_complaint: bool
+    formal_complaint_reason: str
+    support_case_action: CaseServiceAction | None
+    support_case_id: str | None
+    support_case_type: CaseType | None
+    support_case_priority: CasePriority | None
+    support_case_status: CaseStatus | None
+    support_case_reason_codes: list[HandoffReason]
 
 
 def latest_text_user_message(state: RefundState) -> HumanMessage | None:
@@ -58,4 +81,15 @@ def new_turn_state(decision: Intent | None) -> dict[str, Any]:
         "requires_manual_review": False,
         "order_id_valid": False,
         "reason": "",
+        "human_handoff_requested": False,
+        "human_handoff_confirmed": False,
+        "staff_complaint_severity": None,
+        "explicit_other_complaint": False,
+        "formal_complaint_reason": "",
+        "support_case_action": None,
+        "support_case_id": None,
+        "support_case_type": None,
+        "support_case_priority": None,
+        "support_case_status": None,
+        "support_case_reason_codes": [],
     }

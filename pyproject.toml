@@ -1,15 +1,17 @@
 [project]
 name = "langgraph-refund-agent"
-version = "0.3.0"
+version = "0.4.0"
 description = "A risk-aware, human-in-the-loop customer-service assistant built with LangGraph."
 authors = [{ name = "duxingru" }]
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.116.0",
     "langchain-openai>=1.4.2",
     "langgraph>=1.0.0",
     "psycopg[binary]>=3.3.4",
+    "psycopg-pool>=3.3.0",
     "python-dotenv>=1.0.1",
 ]
 
@@ -17,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "anyio>=4.7.0",
+    "httpx>=0.28.0",
     "mypy>=1.13.0",
     "pytest>=9.0.3",
     "ruff>=0.8.2",
@@ -32,7 +35,7 @@ include = ["agent*"]
 
 
 [tool.setuptools.package-data]
-"agent" = ["data/*.json"]
+"agent" = ["data/*.json", "sql/migrations/*.sql"]
 
 [tool.ruff]
 extend-exclude = [".uv-cache", ".venv", "build", "dist"]
@@ -62,3 +65,6 @@ convention = "google"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "postgres: requires CASE_TEST_POSTGRES_URI and a disposable PostgreSQL database",
+]

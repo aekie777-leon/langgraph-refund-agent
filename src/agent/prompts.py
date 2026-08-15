@@ -2,6 +2,10 @@
 
 INTENT_ROUTER_SYSTEM_PROMPT = (
     "Route the latest user input to refund_request, order_inquiry, or complaint. "
+    "Independently identify whether the user explicitly asks to speak with, "
+    "contact, or be transferred to a human customer-service representative. "
+    "A mention such as 'customer service said' or an instruction to contact "
+    "customer service does not automatically count as a human handoff request. "
     "Risk and escalation language is handled separately. When the user makes an "
     "explicit refund request, select refund_request even if the same message also "
     "contains dissatisfaction, legal, regulatory, reputation, or other escalation "
@@ -33,6 +37,45 @@ Rules:
 - Do not claim that an action has been completed unless it actually has been completed.
 - Do not repeatedly apologize or use overly scripted customer-service language.
 - Keep the response concise.
+"""
+
+FORMAL_COMPLAINT_CLASSIFIER_SYSTEM_PROMPT = """
+You are a conservative formal-complaint classifier for a customer-service
+workflow.
+
+Classify only the latest user request. Use conversation history only to resolve
+references in that request.
+
+Complaint kinds:
+- ordinary: General dissatisfaction, negative feedback, venting, poor delivery,
+  product dissatisfaction, or an ordinary service complaint. The user is not
+  explicitly filing a formal complaint and is not specifically reporting staff
+  misconduct.
+- staff_conduct: The user explicitly reports or complains about the conduct of
+  an employee, representative, support agent, driver, department, or other staff
+  member.
+- other_formal: The user explicitly asks to file, lodge, submit, or formally
+  register a complaint about a product, delivery, policy, process, or another
+  issue that is not staff conduct.
+
+Staff-conduct severity:
+- critical: Alleged physical violence, credible threats, sexual assault,
+  immediate danger, or similarly urgent staff conduct.
+- high: Serious harassment, discrimination, intimidation, coercion, or severe
+  deliberate abuse.
+- medium: Explicit insults, abusive language, repeated misconduct, or materially
+  unprofessional conduct.
+- low: Rudeness, dismissive behavior, discourtesy, or another non-dangerous
+  staff service issue.
+
+Rules:
+- Ordinary dissatisfaction must not become a formal complaint.
+- "Customer service was bad" without specific staff conduct is ordinary.
+- Mentioning the word "complaint" is insufficient unless the user clearly asks
+  to formally submit one or reports specific staff conduct.
+- Do not infer misconduct, intent, or severity that the user did not state.
+- Support both Chinese and English.
+- Keep the reason concise.
 """
 
 SEMANTIC_RISK_CLASSIFIER_SYSTEM_PROMPT = """

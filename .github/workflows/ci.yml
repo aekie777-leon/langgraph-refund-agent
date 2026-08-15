@@ -17,6 +17,22 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: refund_agent_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d refund_agent_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      CASE_TEST_POSTGRES_URI: postgresql://postgres:postgres@127.0.0.1:5432/refund_agent_test
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +50,8 @@ jobs:
         run: uv sync --frozen --extra dev
       - name: Lint
         run: uv run ruff check .
+      - name: Type check
+        run: uv run mypy src
       - name: Test
         run: uv run pytest
       - name: Build package

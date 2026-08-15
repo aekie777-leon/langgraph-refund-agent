@@ -1,8 +1,17 @@
 # LangGraph Refund Agent
 
-A small, risk-aware customer-service assistant built with LangGraph. It classifies refund requests, order inquiries, and complaints; performs deterministic and semantic risk checks; keeps refund decisions deterministic; asks for confirmation before an automatic refund; and stores refund requests in PostgreSQL.
+A small, risk-aware customer-service assistant built with LangGraph. It classifies refund requests, order inquiries, and complaints; performs deterministic and semantic risk checks; keeps refund decisions deterministic; asks for confirmation before an automatic refund; and stores refund requests, support cases, and immutable case events in PostgreSQL.
 
-Version: `0.3.0`
+Version: `0.4.0`
+
+## What's new in v0.4.0
+
+- Deterministic handoff policy with explicit case types, priorities, and reason codes
+- PostgreSQL support-case and immutable event persistence with idempotency and optimistic locking
+- A PostgreSQL provider plus repository/service boundaries for future webhook or customer-service adapters
+- LangGraph handoff nodes for risk, manual refund, confirmed human support, and formal complaints
+- Internal FastAPI endpoints for case lookup, event history, and validated status transitions
+- Focused unit, graph integration, API contract, and optional PostgreSQL round-trip tests
 
 ## What's new in v0.3.0
 
@@ -17,6 +26,8 @@ Version: `0.3.0`
 
 - Structured order-number detection with an OpenAI-compatible chat model
 - Structured intent routing for refunds, order inquiries, and complaints
+- Explicit human-support request detection with interrupt-based confirmation
+- Structured classification of staff-conduct and other formal complaints
 - Deterministic bilingual risk-rule matching before any semantic risk classification
 - Structured semantic risk classification for self-harm, violence, legal, regulatory, reputation, and other risks
 - Hard-critical risk handling that cannot be downgraded by the semantic classifier
@@ -27,6 +38,8 @@ Version: `0.3.0`
 - Manual-review routing for refunds of 100 or more
 - Safe multi-turn order context with explicit-reference checks
 - PostgreSQL persistence with idempotent request creation
+- Deterministic support-case creation for qualified risk and manual-refund triggers
+- One unresolved case per thread and case type, with later triggers appended as events
 - Offline unit and graph integration tests
 - Bundled demonstration orders with dates relative to the current day
 
@@ -43,8 +56,11 @@ User message
           -> none / low / medium
              -> classify business intent
                 -> complaint
+                   -> classify staff-conduct / other formal / ordinary complaint
+                   -> confirm an explicit human-support request when present
                    -> normal complaint response or non-critical risk response
                 -> order inquiry / refund request
+                   -> confirm an explicit human-support request when present
                    -> low / medium risk
                       -> ask whether to handle the order now
                          -> continue with the order
@@ -59,6 +75,9 @@ User message
                       -> ask for refund confirmation
                          -> create one PostgreSQL refund request
                          -> cancel
+    -> finalize support-case handoff
+       -> no qualifying trigger: finish without a case database query
+       -> qualifying trigger: create a case or append an idempotent event
 ```
 
 ## Risk handling
@@ -73,6 +92,48 @@ Risk rules live in `src/agent/data/risk_rules.json`. Each entry contains an ID, 
 
 The rule matcher does not call an LLM, route the graph, or make a final human-review decision.
 
+## Support-case handoff
+
+Every completed graph turn passes through `finalize_case_handoff`. The node
+converts existing structured graph facts into `HandoffPolicyInput`, applies the
+deterministic handoff policy, and calls `CaseService` only when the policy
+requires a case. Normal order inquiries, low-risk messages, and ordinary
+expressions of dissatisfaction do not query the case repository.
+
+The current graph integration creates cases for:
+
+- hard-critical rule matches;
+- semantic `medium`, `high`, or `critical` risks;
+- refunds that require manual review;
+- explicit human-support requests after user confirmation;
+- structured staff-conduct complaints;
+- other complaints that the classifier identifies as an explicit formal complaint.
+
+Ordinary dissatisfaction still receives a complaint response without creating a
+case. A human-support request is not persisted until the user confirms the
+`human_handoff_confirmation` interrupt.
+
+Case persistence requires the LangGraph `thread_id` and a stable triggering
+`HumanMessage.id`. The message ID forms part of the idempotency key, so the graph
+does not generate a random fallback. PostgreSQL failures remain visible as run
+failures rather than reporting a handoff that was not saved.
+
+### Internal support-case API
+
+The custom FastAPI application exposes operational case endpoints under
+`/internal/support-cases` alongside the LangGraph Agent Server API:
+
+- `GET /internal/support-cases` lists cases with optional `status`, `priority`,
+  `case_type`, `thread_id`, and `order_id` filters;
+- `GET /internal/support-cases/{case_id}` returns one case;
+- `GET /internal/support-cases/{case_id}/events` returns its immutable audit events;
+- `POST /internal/support-cases/{case_id}/status` applies an idempotent status change.
+
+The status request requires a stable `request_id` and an `actor`. Moving a case
+to `on_hold` additionally requires `on_hold_reason`. See
+[`docs/internal_case_api.md`](docs/internal_case_api.md) for request examples,
+error codes, lifecycle rules, and deployment limitations.
+
 ### Resume an order-priority interrupt
 
 When a run returns an `order_priority_confirmation` interrupt, resume the same thread rather than sending a new user message. To continue with the order, send:
@@ -82,6 +143,21 @@ When a run returns an `order_priority_confirmation` interrupt, resume the same t
   "assistant_id": "agent",
   "command": {
     "resume": "handle_order"
+  }
+}
+```
+
+### Resume a human-support confirmation
+
+When a run returns a `human_handoff_confirmation` interrupt, resume the same
+thread with `confirm_handoff` to create a `general_support` case, or with
+`continue_self_service` to return to the previously classified business flow.
+
+```json
+{
+  "assistant_id": "agent",
+  "command": {
+    "resume": "confirm_handoff"
   }
 }
 ```
@@ -140,13 +216,17 @@ Alternatively, set the individual `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRE
 
 ## Database initialization
 
-Create the database, then apply the included schema:
+Create the database, then apply all pending versioned migrations:
 
 ```bash
-psql -d refund_agent -f scripts/init_db.sql
+uv run python scripts/apply_migrations.py
 ```
 
-The schema places a unique constraint on `order_id`, preventing duplicate refund requests when concurrent calls target the same order.
+Applied migration versions and SHA-256 checksums are recorded in
+`case_management.schema_migrations`. Existing migrations must not be edited
+after they have been applied; add a new numbered SQL file instead. The case
+tables live in the separate `case_management` schema and do not modify
+LangGraph's internal tables.
 
 ## Run locally
 
@@ -174,7 +254,7 @@ The API is available at `http://127.0.0.1:8000`. Check it with:
 curl http://127.0.0.1:8000/ok
 ```
 
-Compose supplies `DATABASE_URI`, `POSTGRES_URI`, and `REDIS_URI` inside the API container. PostgreSQL is initialized from `scripts/init_db.sql` only when the `postgres-data` volume is created for the first time.
+Compose supplies `DATABASE_URI`, `POSTGRES_URI`, and `REDIS_URI` inside the API container. The one-shot `case-migrations` service applies pending migrations before `langgraph-api` starts, including when the `postgres-data` volume already exists. Migration failure prevents the API from starting.
 
 Stop the services without deleting database data:
 
@@ -211,7 +291,19 @@ uv run mypy src
 uv build
 ```
 
-The integration tests replace the intent router, order detector, semantic risk classifier, and response model with offline fakes and do not connect to PostgreSQL. No API key or database is required to run the test suite.
+The graph and internal-API unit tests use offline fakes and require no API key.
+PostgreSQL repository and API round-trip tests are skipped unless
+`CASE_TEST_POSTGRES_URI` points to a disposable test database. To run them explicitly:
+
+```powershell
+$env:CASE_TEST_POSTGRES_URI = "postgresql://user:password@localhost:5432/refund_agent"
+uv run pytest -m postgres tests/integration_tests/test_postgres_case_repository.py
+```
+
+Never point `CASE_TEST_POSTGRES_URI` at a production database. The tests create
+and remove records whose thread IDs use a unique `case-integration-` prefix.
+GitHub Actions provisions a disposable PostgreSQL 16 service and runs these
+tests on both supported Python versions.
 
 ## Project layout
 
@@ -220,10 +312,23 @@ The integration tests replace the intent router, order detector, semantic risk c
 |-- .github/workflows/ci.yml
 |-- compose.yaml
 |-- Dockerfile
-|-- scripts/init_db.sql
+|-- scripts/
+|   `-- apply_migrations.py
 |-- src/agent/
+|   |-- cases/
+|   |   |-- api.py
+|   |   |-- api_errors.py
+|   |   |-- api_models.py
+|   |   |-- models.py
+|   |   |-- policy.py
+|   |   |-- postgres_repository.py
+|   |   |-- repository.py
+|   |   |-- runtime.py
+|   |   `-- service.py
+|   |-- sql/migrations/
 |   |-- nodes/
 |   |   |-- complaints.py
+|   |   |-- cases.py
 |   |   |-- intent.py
 |   |   |-- orders.py
 |   |   |-- refunds.py
@@ -239,7 +344,8 @@ The integration tests replace the intent router, order detector, semantic risk c
 |   |-- risk_matcher.py
 |   |-- routing.py
 |   |-- schemas.py
-|   `-- state.py
+|   |-- state.py
+|   `-- webapp.py
 |-- tests/
 |   |-- integration_tests/
 |   `-- unit_tests/
@@ -257,7 +363,11 @@ The integration tests replace the intent router, order detector, semantic risk c
 - A production service must authenticate users and verify that an order belongs to the requesting user.
 - Add authorization, audit logging, monitoring, rate limits, encrypted secret management, and a real order service before production use.
 - Review the refund policy and manual-review threshold with the responsible business and legal teams.
-- `risk_requires_human_review` is currently a workflow state flag and response behavior; it is not connected to a real ticketing or human-queue system.
+- Risk and manual-refund handoffs are persisted as support cases, but no external customer-service queue adapter is connected yet.
+- The v0.4 internal support-case API has no application-level authentication.
+  Compose binds it to `127.0.0.1`; do not expose it to an external network until
+  authentication and authorization are configured at the Agent Server or gateway.
+- Human-request and formal-complaint detection use LLM structured output and therefore require production evaluation against representative multilingual conversations.
 - The bundled risk rules are intentionally conservative demonstration data, not a complete safety or compliance vocabulary.
 - Semantic risk classification depends on the configured model and may vary across wording or languages. Validate the policy, prompts, and responses with qualified safety, legal, and compliance reviewers before production use.
 
@@ -269,9 +379,18 @@ Released under the MIT License. See `LICENSE`.
 
 # LangGraph 退款 Agent
 
-这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别退款申请、订单查询和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断退款资格，在自动退款前请求用户确认，并把退款申请保存到 PostgreSQL。
+这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别退款申请、订单查询和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断退款资格，在自动退款前请求用户确认，并把退款申请、人工工单和不可变工单事件保存到 PostgreSQL。
 
-版本：`0.3.0`
+版本：`0.4.0`
+
+## v0.4.0 新增内容
+
+- 增加确定性的工单交接策略，明确工单类型、优先级和 reason codes
+- 使用 PostgreSQL 持久化工单和不可变事件，并实现幂等与乐观锁
+- 实现 PostgreSQL provider，并预留 Repository/Service 边界供后续 Webhook 或客户客服系统适配器接入
+- 接入风险、大额退款、已确认真人请求和正式投诉的 LangGraph 工单节点
+- 增加内部 FastAPI 接口，用于查询工单、读取事件和校验状态转换
+- 增加单元、Graph 集成、API 契约及可选 PostgreSQL 往返测试
 
 ## v0.3.0 新增内容
 
@@ -286,6 +405,8 @@ Released under the MIT License. See `LICENSE`.
 
 - 使用兼容 OpenAI 接口的聊天模型识别订单号
 - 使用结构化输出区分退款申请、订单查询和投诉
+- 识别明确的真人客服请求，并通过 interrupt 让用户确认
+- 使用结构化输出区分人员行为投诉、其他正式投诉和一般不满
 - 在语义分类前执行确定性的中英文风险规则匹配
 - 使用结构化输出分类自伤、暴力、法律、监管、声誉和其他风险
 - hard critical 命中不会被后续 LLM 降级
@@ -296,6 +417,8 @@ Released under the MIT License. See `LICENSE`.
 - 金额大于或等于 100 时转人工审核
 - 仅在用户明确指代上一订单时复用多轮订单上下文
 - 使用 PostgreSQL 持久化，并保证同一订单不会重复创建退款申请
+- 对符合条件的风险和大额退款触发确定性的人工工单
+- 同一 thread 和工单类型只保留一个未解决工单，后续触发追加为事件
 - 包含离线单元测试和图集成测试
 - 演示订单使用相对日期，不会随着时间推移全部失效
 
@@ -312,8 +435,11 @@ Released under the MIT License. See `LICENSE`.
           -> none / low / medium
              -> 识别业务意图
                 -> 投诉
+                   -> 分类人员行为投诉 / 其他正式投诉 / 一般不满
+                   -> 存在明确真人客服请求时要求用户确认
                    -> 普通投诉回复或非高危风险回复
                 -> 订单查询 / 退款申请
+                   -> 存在明确真人客服请求时要求用户确认
                    -> low / medium 风险
                       -> 询问是否现在处理订单
                          -> 继续处理订单
@@ -328,6 +454,9 @@ Released under the MIT License. See `LICENSE`.
                       -> 请求用户确认
                          -> 在 PostgreSQL 中创建一条退款申请
                          -> 取消退款
+    -> 完成人工工单交接
+       -> 没有符合条件的触发：不查询工单数据库并结束
+       -> 存在符合条件的触发：创建工单或幂等追加事件
 ```
 
 ## 风险处理
@@ -342,6 +471,45 @@ Released under the MIT License. See `LICENSE`.
 
 规则 matcher 不调用 LLM，不包含图路由逻辑，也不直接决定最终是否转人工。
 
+## 人工工单交接
+
+每个完整结束的 Graph 轮次都会经过 `finalize_case_handoff`。该节点把现有
+Graph 结构化事实转换为 `HandoffPolicyInput`，执行确定性的交接策略，并且
+只有在策略要求创建工单时才调用 `CaseService`。普通订单查询、低风险消息和
+一般的不满表达不会查询工单 Repository。
+
+目前 Graph 已接入以下工单触发条件：
+
+- hard critical 规则命中；
+- semantic `medium`、`high` 或 `critical` 风险；
+- 需要人工审核的大额退款；
+- 用户确认后的明确真人客服请求；
+- 结构化识别的人员行为投诉；
+- 分类器识别为明确正式投诉的其他投诉。
+
+普通表达不满仍只返回投诉回复，不创建工单。真人客服请求只有在用户确认
+`human_handoff_confirmation` interrupt 后才会持久化。
+
+工单持久化要求存在 LangGraph `thread_id` 和稳定的触发消息
+`HumanMessage.id`。消息 ID 会参与生成幂等键，因此 Graph 不会随机补一个
+ID。PostgreSQL 写入失败会明确导致本次 Run 失败，不会返回一个实际上没有
+保存成功的人工交接结果。
+
+### 内部工单 API
+
+自定义 FastAPI 应用会在 LangGraph Agent Server API 旁边提供
+`/internal/support-cases` 下的工单操作接口：
+
+- `GET /internal/support-cases`：按照 `status`、`priority`、`case_type`、
+  `thread_id` 或 `order_id` 筛选工单；
+- `GET /internal/support-cases/{case_id}`：查询单个工单；
+- `GET /internal/support-cases/{case_id}/events`：查询不可变的审计事件；
+- `POST /internal/support-cases/{case_id}/status`：执行幂等的状态变更。
+
+状态请求必须提供稳定的 `request_id` 和操作人 `actor`。将工单改为
+`on_hold` 时还必须提供 `on_hold_reason`。请求示例、错误码、状态规则和部署
+限制详见 [`docs/internal_case_api.md`](docs/internal_case_api.md)。
+
 ### 恢复订单优先级 interrupt
 
 当运行结果出现 `order_priority_confirmation` interrupt 时，应当恢复同一个 thread，不能发送一条新的用户消息。继续处理订单时发送：
@@ -351,6 +519,21 @@ Released under the MIT License. See `LICENSE`.
   "assistant_id": "agent",
   "command": {
     "resume": "handle_order"
+  }
+}
+```
+
+### 恢复真人客服确认 interrupt
+
+当运行结果出现 `human_handoff_confirmation` interrupt 时，恢复同一个
+thread 并传入 `confirm_handoff` 会创建 `general_support` 工单；传入
+`continue_self_service` 会返回之前识别出的业务流程。
+
+```json
+{
+  "assistant_id": "agent",
+  "command": {
+    "resume": "confirm_handoff"
   }
 }
 ```
@@ -403,13 +586,14 @@ POSTGRES_URI=postgresql://user:password@localhost:5432/refund_agent
 
 ## 初始化数据库
 
-创建数据库后执行仓库中的建表脚本：
+创建数据库后执行所有尚未应用的版本化迁移：
 
 ```bash
-psql -d refund_agent -f scripts/init_db.sql
+uv run python scripts/apply_migrations.py
 ```
 
-数据库会为 `order_id` 建立唯一约束，即使出现并发请求，同一订单也不会生成多条退款申请。
+迁移版本和 SHA-256 校验值保存在
+`case_management.schema_migrations` 中。迁移一旦应用就不应修改；数据库结构变化应新增编号更高的 SQL 文件。工单表位于独立的 `case_management` schema，不会修改 LangGraph 内部表。
 
 ## 本地运行
 
@@ -437,7 +621,7 @@ API 地址为 `http://127.0.0.1:8000`，可以执行以下命令检查：
 curl http://127.0.0.1:8000/ok
 ```
 
-Compose 会自动为 API 容器设置 `DATABASE_URI`、`POSTGRES_URI` 和 `REDIS_URI`。`scripts/init_db.sql` 只会在第一次创建 `postgres-data` 数据卷时执行。
+Compose 会自动为 API 容器设置 `DATABASE_URI`、`POSTGRES_URI` 和 `REDIS_URI`。一次性的 `case-migrations` 服务会在 `langgraph-api` 启动前应用待执行迁移，即使 `postgres-data` 数据卷已经存在也会运行。迁移失败时 API 不会启动。
 
 停止服务但保留数据库数据：
 
@@ -474,7 +658,16 @@ uv run mypy src
 uv build
 ```
 
-集成测试会用离线实现替换意图路由、订单号识别、语义风险分类器和回复模型，而且不会连接 PostgreSQL，因此运行测试不需要 API 密钥或数据库。
+Graph 和内部 API 单元测试使用离线实现，不需要 API 密钥。只有在
+`CASE_TEST_POSTGRES_URI` 指向可清理的测试数据库时，才会运行 PostgreSQL
+Repository 与 API 往返集成测试：
+
+```powershell
+$env:CASE_TEST_POSTGRES_URI = "postgresql://user:password@localhost:5432/refund_agent"
+uv run pytest -m postgres tests/integration_tests/test_postgres_case_repository.py
+```
+
+不要让 `CASE_TEST_POSTGRES_URI` 指向生产数据库。测试只会创建并清理 thread ID 带有唯一 `case-integration-` 前缀的数据。GitHub Actions 会启动一次性的 PostgreSQL 16 服务，并在两个受支持的 Python 版本上执行这些测试。
 
 ## 项目结构
 
@@ -483,10 +676,23 @@ uv build
 |-- .github/workflows/ci.yml
 |-- compose.yaml
 |-- Dockerfile
-|-- scripts/init_db.sql
+|-- scripts/
+|   `-- apply_migrations.py
 |-- src/agent/
+|   |-- cases/
+|   |   |-- api.py
+|   |   |-- api_errors.py
+|   |   |-- api_models.py
+|   |   |-- models.py
+|   |   |-- policy.py
+|   |   |-- postgres_repository.py
+|   |   |-- repository.py
+|   |   |-- runtime.py
+|   |   `-- service.py
+|   |-- sql/migrations/
 |   |-- nodes/
 |   |   |-- complaints.py
+|   |   |-- cases.py
 |   |   |-- intent.py
 |   |   |-- orders.py
 |   |   |-- refunds.py
@@ -502,7 +708,8 @@ uv build
 |   |-- risk_matcher.py
 |   |-- routing.py
 |   |-- schemas.py
-|   `-- state.py
+|   |-- state.py
+|   `-- webapp.py
 |-- tests/
 |   |-- integration_tests/
 |   `-- unit_tests/
@@ -520,7 +727,11 @@ uv build
 - 生产服务必须验证用户身份，并确认订单确实属于发起请求的用户。
 - 上线前需要补充权限控制、审计日志、监控、限流和加密密钥管理，并接入真实订单服务。
 - 退款规则和人工审核金额阈值需要由相应的业务及法务人员确认。
-- `risk_requires_human_review` 目前只是工作流状态标记和回复行为，尚未连接真实工单或人工队列系统。
+- 风险和大额退款交接已经持久化为人工工单，但尚未连接外部客户客服队列适配器。
+- v0.4 内部工单 API 暂未实现应用层鉴权。Compose 只把它绑定到
+  `127.0.0.1`；在 Agent Server 或网关配置身份认证和权限控制之前，不应将
+  该接口暴露到外部网络。
+- 真人请求和正式投诉识别依赖 LLM 结构化输出，上线前仍需使用有代表性的多语言对话进行评测。
 - 内置风险规则是有意保持保守的演示数据，并不是完整的安全或合规词库。
 - 语义风险分类取决于所配置的模型，可能因措辞或语言不同而产生差异。投入生产环境前，应由专业的安全、法务和合规人员验证规则、提示词和回复内容。
 

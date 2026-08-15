@@ -6,7 +6,12 @@ from typing import Any
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
-from agent.schemas import OrderDetection, Route, SemanticRiskDetection
+from agent.schemas import (
+    FormalComplaintDetection,
+    OrderDetection,
+    Route,
+    SemanticRiskDetection,
+)
 
 load_dotenv()
 
@@ -50,3 +55,8 @@ def get_router() -> Any:
 def get_risk_classifier() -> Any:
     """Create the structured-output semantic risk classifier."""
     return get_llm().with_structured_output(SemanticRiskDetection)
+
+
+def get_formal_complaint_classifier() -> Any:
+    """Create the structured-output formal-complaint classifier."""
+    return get_llm().with_structured_output(FormalComplaintDetection)

@@ -4,6 +4,8 @@ import pytest
 
 from agent.routing import (
     route_after_detection,
+    route_after_formal_complaint,
+    route_after_human_handoff_declined,
     route_after_order_lookup,
     route_after_policy,
     route_after_risk_rules,
@@ -17,12 +19,12 @@ from agent.routing import (
     [
         ("refund_request", "none", "order_query"),
         ("order_inquiry", "none", "order_query"),
-        ("complaint", "none", "complaint"),
+        ("complaint", "none", "formal_complaint"),
         ("refund_request", "low", "confirm_order_priority"),
         ("order_inquiry", "medium", "confirm_order_priority"),
-        ("complaint", "low", "noncritical_risk"),
-        ("complaint", "medium", "noncritical_risk"),
-        (None, "none", "END"),
+        ("complaint", "low", "formal_complaint"),
+        ("complaint", "medium", "formal_complaint"),
+        (None, "none", "finalize"),
     ],
 )
 def test_route_by_intent_and_risk(
@@ -73,9 +75,7 @@ def test_route_after_risk_rules(
     ],
 )
 def test_route_after_semantic_risk(risk_level, expected: str) -> None:
-    assert (
-        route_after_semantic_risk({"semantic_risk_level": risk_level}) == expected
-    )
+    assert route_after_semantic_risk({"semantic_risk_level": risk_level}) == expected
 
 
 def test_route_after_semantic_risk_rejects_a_missing_level() -> None:
@@ -96,9 +96,84 @@ def test_medium_self_harm_order_request_still_offers_order_help() -> None:
     )
 
 
+def test_explicit_human_request_is_confirmed_before_order_processing() -> None:
+    assert (
+        route_by_intent_and_risk(
+            {
+                "decision": "refund_request",
+                "semantic_risk_level": "none",
+                "human_handoff_requested": True,
+            }
+        )
+        == "confirm_human_handoff"
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (
+            {
+                "human_handoff_requested": True,
+                "semantic_risk_level": "none",
+            },
+            "confirm_human_handoff",
+        ),
+        (
+            {
+                "human_handoff_requested": False,
+                "semantic_risk_level": "medium",
+            },
+            "noncritical_risk",
+        ),
+        (
+            {
+                "human_handoff_requested": False,
+                "semantic_risk_level": "none",
+            },
+            "complaint",
+        ),
+    ],
+)
+def test_route_after_formal_complaint(state, expected: str) -> None:
+    assert route_after_formal_complaint(state) == expected
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (
+            {"decision": "refund_request", "semantic_risk_level": "none"},
+            "detect_order",
+        ),
+        (
+            {"decision": "order_inquiry", "semantic_risk_level": "medium"},
+            "confirm_order_priority",
+        ),
+        (
+            {"decision": "complaint", "semantic_risk_level": "none"},
+            "handle_complaint",
+        ),
+        (
+            {"decision": "complaint", "semantic_risk_level": "low"},
+            "handle_noncritical_risk",
+        ),
+    ],
+)
+def test_route_after_human_handoff_declined(state, expected: str) -> None:
+    assert route_after_human_handoff_declined(state) == expected
+
+
+def test_declined_handoff_rejects_an_unusable_state() -> None:
+    with pytest.raises(ValueError, match="Cannot resume self-service flow"):
+        route_after_human_handoff_declined(
+            {"decision": None, "semantic_risk_level": "none"}
+        )
+
+
 @pytest.mark.parametrize(
     ("order_id", "expected"),
-    [("ORD-10001", "search_node"), (None, "END")],
+    [("ORD-10001", "search_node"), (None, "finalize")],
 )
 def test_route_after_detection(order_id: str | None, expected: str) -> None:
     assert route_after_detection({"order_id": order_id}) == expected
@@ -107,7 +182,7 @@ def test_route_after_detection(order_id: str | None, expected: str) -> None:
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
-        ({"search_success": False}, "END"),
+        ({"search_success": False}, "finalize"),
         (
             {"search_success": True, "decision": "order_inquiry"},
             "order_response",
@@ -124,16 +199,14 @@ def test_route_after_order_lookup(state, expected: str) -> None:
 
 def test_route_after_order_lookup_rejects_an_unexpected_intent() -> None:
     with pytest.raises(ValueError, match="Unexpected decision after order lookup"):
-        route_after_order_lookup(
-            {"search_success": True, "decision": "complaint"}
-        )
+        route_after_order_lookup({"search_success": True, "decision": "complaint"})
 
 
 @pytest.mark.parametrize(
     ("eligible", "manual_review", "expected"),
     [
-        (False, False, "END"),
-        (True, True, "END"),
+        (False, False, "finalize"),
+        (True, True, "finalize"),
         (True, False, "approval_node"),
     ],
 )
