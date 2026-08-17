@@ -18,6 +18,8 @@ CaseType = Literal[
     "general_support",
     "staff_conduct_complaint",
     "other_complaint",
+    "order_operation_review",
+    "delivery_investigation",
 ]
 CasePriority = Literal["p0", "p1", "p2", "p3"]
 CaseStatus = Literal["open", "in_progress", "on_hold", "resolved"]
@@ -70,6 +72,22 @@ HandoffReason = Literal[
     "staff_conduct_medium",
     "staff_conduct_low",
     "explicit_other_complaint",
+    "order_state_invalid",
+    "cancellation_fulfillment_processing",
+    "cancellation_state_invalid",
+    "operation_delivery_date_invalid",
+    "return_eligibility_unknown",
+    "exchange_eligibility_unknown",
+    "currency_threshold_unconfigured",
+    "return_manual_amount_review",
+    "exchange_inventory_unknown",
+    "delivery_data_invalid",
+    "delivery_tracking_stalled",
+    "delivery_overdue_investigation",
+    "delivery_failed",
+    "delivery_marked_received_dispute",
+    "delivery_damage_claim",
+    "delivery_other_issue",
 ]
 
 
@@ -97,6 +115,7 @@ class HandoffPolicyInput(BaseModel):
     human_handoff_confirmed: bool = False
     staff_complaint_severity: StaffComplaintSeverity | None = None
     explicit_other_complaint: bool = False
+    domain_case_reason_codes: tuple[HandoffReason, ...] = Field(default_factory=tuple)
 
     @model_validator(mode="after")
     def validate_semantic_risk(self) -> Self:

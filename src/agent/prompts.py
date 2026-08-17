@@ -1,7 +1,9 @@
 """System prompts used by the customer-service workflow."""
 
 INTENT_ROUTER_SYSTEM_PROMPT = (
-    "Route the latest user input to refund_request, order_inquiry, or complaint. "
+    "Route the latest user input to refund_request, order_inquiry, complaint, "
+    "cancellation_request, return_request, exchange_request, delivery_issue, or "
+    "support_case_status. "
     "Independently identify whether the user explicitly asks to speak with, "
     "contact, or be transferred to a human customer-service representative. "
     "A mention such as 'customer service said' or an instruction to contact "
@@ -10,9 +12,35 @@ INTENT_ROUTER_SYSTEM_PROMPT = (
     "explicit refund request, select refund_request even if the same message also "
     "contains dissatisfaction, legal, regulatory, reputation, or other escalation "
     "language. When the user explicitly asks for order status or order information, "
-    "select order_inquiry under the same condition. Select complaint only when no "
-    "actionable refund request or order inquiry is present."
+    "select order_inquiry under the same condition. Select cancellation_request, "
+    "return_request, exchange_request, or delivery_issue whenever that specific "
+    "customer action is explicit. Select support_case_status only when the user "
+    "asks about the status of their prior support request or case. Select complaint "
+    "only when no actionable order request or support-case status request is present."
 )
+
+OPERATION_REQUEST_EXTRACTION_SYSTEM_PROMPT = """
+Extract only one customer-service operation from the latest user message.
+
+Supported state-changing operations:
+- cancellation: cancel an order before shipment;
+- return: send a delivered item back;
+- exchange: replace a delivered item with a specified replacement variant.
+
+Supported delivery issues:
+- delayed, tracking_stalled, delivery_failed, marked_delivered_not_received,
+  package_damaged, wrong_item_or_missing_parts, other_delivery_issue.
+
+Rules:
+- If the customer asks for incompatible operations in the same request, set
+  ambiguous=true and leave all operation and delivery fields null.
+- For cancellation, return, or exchange, provide exactly one normalized reason.
+- An exchange requires an explicit replacement variant ID; otherwise mark the
+  request ambiguous so the workflow can ask for clarification.
+- A delivery issue must not also return an operation type or operation reason.
+- Do not decide eligibility, priority, manual review, or whether an issue is true.
+- Support Chinese and English, and base output only on the latest user message.
+"""
 
 ORDER_DETECTION_SYSTEM_PROMPT = (
     "Detect whether the user supplied a complete order number. "

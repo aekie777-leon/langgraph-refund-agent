@@ -90,7 +90,7 @@ def build_semantic_risk_classifier_node(classifier: Any) -> AsyncNode:
 
 def confirm_order_priority(
     _state: RefundState,
-) -> Command[Literal["detect_order", "handle_noncritical_risk"]]:
+) -> Command[Literal["resume_order_flow", "handle_noncritical_risk"]]:
     """Ask whether the user wants to handle the order request now."""
     decision = interrupt(
         {
@@ -115,7 +115,7 @@ def confirm_order_priority(
 
     if decision == "handle_order":
         return Command(
-            goto="detect_order",
+            goto="resume_order_flow",
             update={"risk_order_choice": "handle_order"},
         )
     if decision == "continue_risk":

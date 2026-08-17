@@ -51,6 +51,7 @@ def build_handoff_policy_input(state: RefundState) -> HandoffPolicyInput:
         human_handoff_confirmed=bool(state.get("human_handoff_confirmed")),
         staff_complaint_severity=state.get("staff_complaint_severity"),
         explicit_other_complaint=bool(state.get("explicit_other_complaint")),
+        domain_case_reason_codes=tuple(state.get("domain_case_reason_codes", [])),
     )
 
 

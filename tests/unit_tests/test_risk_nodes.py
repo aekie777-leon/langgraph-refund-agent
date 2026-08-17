@@ -114,7 +114,7 @@ async def test_semantic_classifier_skips_model_without_a_text_message() -> None:
 @pytest.mark.parametrize(
     ("decision", "expected_goto"),
     [
-        ("handle_order", "detect_order"),
+        ("handle_order", "resume_order_flow"),
         ("continue_risk", "handle_noncritical_risk"),
     ],
 )

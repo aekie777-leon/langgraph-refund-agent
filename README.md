@@ -1,8 +1,16 @@
 # LangGraph Refund Agent
 
-A small, risk-aware customer-service assistant built with LangGraph. It classifies refund requests, order inquiries, and complaints; performs deterministic and semantic risk checks; keeps refund decisions deterministic; asks for confirmation before an automatic refund; and stores refund requests, support cases, and immutable case events in PostgreSQL.
+A small, risk-aware customer-service assistant built with LangGraph. It classifies order operations, refund requests, order inquiries, delivery issues, and complaints; performs deterministic and semantic risk checks; keeps business eligibility decisions deterministic; asks for confirmation before state-changing operations; and stores order operations, refund requests, support cases, and immutable events in PostgreSQL.
 
-Version: `0.4.0`
+Version: `0.5.0`
+
+## What's new in v0.5.0
+
+- Adds intents for order cancellation, returns, exchanges, delivery issues, and current-thread support-case status
+- Uses a dedicated order-operation subgraph with an explicit confirmation interrupt before every operation
+- Persists eligible operations with an idempotency key, then sends automatic operations through a provider boundary
+- Creates or updates a support case when an operation requires manual review or a delivery investigation
+- Includes a deterministic in-memory demo provider for local development and Graph integration tests
 
 ## What's new in v0.4.0
 
@@ -281,6 +289,66 @@ The bundled data is intended only for local demonstration and tests.
 | `ORD-10005` | Already refunded |
 | `ORD-10006` | Invalid future delivery date |
 | `ORD-10007` | Eligible on the seven-day boundary |
+| `ORD-10008` | Confirmed, unfulfilled order for automatic cancellation testing |
+| `ORD-10009` | Processing order for manual cancellation-review testing |
+| `ORD-10010` | Shipped order with intentionally stalled tracking for delivery-investigation testing |
+| `ORD-10011` | Recently delivered order for return or exchange testing |
+
+## v0.5 order-operation lifecycle
+
+The v0.5 operation subflow is deliberately separate from the existing refund
+flow:
+
+```text
+detect order -> load current Provider snapshot -> extract one normalized request
+-> apply deterministic policy -> request explicit confirmation
+-> submit idempotently or create a manual-review / delivery-investigation case
+```
+
+The LLM can identify an intent, reason, delivery issue, or exchange variant. It
+does not decide eligibility, case priority, or whether an order mutation is
+permitted. A `submitted` result means that the local demo Provider accepted the
+request; it does not claim that a real warehouse, carrier, or payment system
+has completed the downstream work.
+
+`src/agent/data/orders.json` remains the simple v0.4 order-lookup fixture used
+by `search_order`. The richer v0.5 snapshots and idempotent submissions are
+provided by the process-local `DemoOrderProvider`. They intentionally share the
+demonstration order IDs but have different responsibilities; neither is a
+production OMS, WMS, carrier, payment, or inventory integration.
+
+## v0.5 Docker/API acceptance test
+
+The following validation creates local demonstration records in the Compose
+PostgreSQL database. Wait until the API service is healthy before calling the
+health endpoint; an immediate `curl: (52) Empty reply from server` after a
+rebuild can simply mean Uvicorn is still starting.
+
+```powershell
+docker compose up --build -d
+docker compose ps
+curl.exe http://127.0.0.1:8000/ok
+```
+
+Open `http://127.0.0.1:8000/docs`, create an assistant with
+`graph_id: "agent"`, then create a thread. Use
+`POST /threads/{thread_id}/runs/wait` for each scenario:
+
+| Input | Expected first result | Resume / expected final result |
+| --- | --- | --- |
+| `Please cancel ORD-10008.` | `order_operation_confirmation` | Resume with `true`; `operation_status: submitted` |
+| `Please cancel ORD-10009.` | `order_operation_confirmation` | Resume with `true`; P1 `order_operation_review` case and `manual_review` operation |
+| `Tracking for ORD-10010 has not updated.` | delivery-investigation confirmation | Resume with `true`; P1 `delivery_investigation` case and no order-operation record |
+| `What is my support request status?` in the same thread | No interrupt | Lists only that thread's support cases |
+
+For an interrupted run, submit the next request to the same thread with:
+
+```json
+{
+  "assistant_id": "YOUR_ASSISTANT_ID",
+  "command": { "resume": true }
+}
+```
 
 ## Quality checks
 
@@ -379,9 +447,19 @@ Released under the MIT License. See `LICENSE`.
 
 # LangGraph 退款 Agent
 
-这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别退款申请、订单查询和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断退款资格，在自动退款前请求用户确认，并把退款申请、人工工单和不可变工单事件保存到 PostgreSQL。
+这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别订单操作、退款申请、订单查询、物流问题和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断业务资格，在会改变状态的操作前请求用户确认，并把订单操作、退款申请、人工工单和不可变事件保存到 PostgreSQL。
 
-版本：`0.4.0`
+版本：`0.5.0`
+
+## v0.5.0 新增内容
+
+- 新增取消订单、退货、换货、物流问题和当前会话工单状态查询意图；
+- 订单操作会先加载 Provider 快照，再由确定性 policy 判断结果；
+- 自动和人工订单操作均要求一次明确确认；自动操作通过稳定幂等键提交 Provider；
+- 人工订单操作创建或复用 `order_operation_review` 工单并关联回订单操作；
+- 物流调查创建 `delivery_investigation` 工单，但不把用户陈述直接当作已证实事实；
+- 工单状态查询只使用当前 LangGraph `thread_id`，不会接受用户指定其他会话；
+- 当前 Provider 是进程内演示实现，真实 OMS / WMS / Carrier 集成仍属于后续工作。
 
 ## v0.4.0 新增内容
 
@@ -648,6 +726,60 @@ docker compose down -v
 | `ORD-10005` | 已退款 |
 | `ORD-10006` | 送达日期在未来，数据无效 |
 | `ORD-10007` | 正好处于七天期限边界 |
+| `ORD-10008` | 已确认但尚未履约，用于自动取消订单测试 |
+| `ORD-10009` | 正在处理，用于取消订单人工审核测试 |
+| `ORD-10010` | 已发货且物流刻意停滞，用于物流调查测试 |
+| `ORD-10011` | 最近送达，用于退货或换货测试 |
+
+## v0.5 订单操作生命周期
+
+v0.5 的订单操作子流程与原有退款流程保持独立：
+
+```text
+识别订单 -> 加载当前 Provider 快照 -> 提取一个规范化请求
+-> 应用确定性规则 -> 请求明确确认
+-> 幂等提交，或创建人工审核 / 物流调查工单
+```
+
+LLM 只能识别意图、原因、物流问题或换货规格，不能决定资格、工单优先级，
+也不能决定是否允许修改订单。`submitted` 仅表示本地演示 Provider 已接受请求，
+不表示真实仓库、物流商或支付系统已经完成后续处理。
+
+`src/agent/data/orders.json` 仍是 v0.4 `search_order` 工具使用的简单订单查询
+fixture。v0.5 使用进程内 `DemoOrderProvider` 提供更完整的快照和幂等提交。
+二者共用演示订单号但职责不同，均不是生产 OMS、WMS、物流、支付或库存集成。
+
+## v0.5 Docker/API 验收测试
+
+以下验证会在 Compose PostgreSQL 中创建本地演示记录。重建后请先等待 API
+服务显示为 healthy；如果刚启动就执行 curl 出现
+`curl: (52) Empty reply from server`，通常只是 Uvicorn 尚未启动完成。
+
+```powershell
+docker compose up --build -d
+docker compose ps
+curl.exe http://127.0.0.1:8000/ok
+```
+
+打开 `http://127.0.0.1:8000/docs`，创建 `graph_id: "agent"` 的 assistant，
+再创建一个 thread。每个场景使用
+`POST /threads/{thread_id}/runs/wait`：
+
+| 输入 | 首次预期结果 | 恢复后预期结果 |
+| --- | --- | --- |
+| `Please cancel ORD-10008.` | `order_operation_confirmation` | 用 `true` 恢复；`operation_status: submitted` |
+| `Please cancel ORD-10009.` | `order_operation_confirmation` | 用 `true` 恢复；创建 P1 `order_operation_review` 工单，操作为 `manual_review` |
+| `Tracking for ORD-10010 has not updated.` | 物流调查确认 | 用 `true` 恢复；创建 P1 `delivery_investigation` 工单，不创建订单操作记录 |
+| 同一 thread 中发送 `What is my support request status?` | 无 interrupt | 仅列出当前 thread 的工单 |
+
+当 run 被 interrupt 后，向同一个 thread 发送下一次请求：
+
+```json
+{
+  "assistant_id": "YOUR_ASSISTANT_ID",
+  "command": { "resume": true }
+}
+```
 
 ## 质量检查
 

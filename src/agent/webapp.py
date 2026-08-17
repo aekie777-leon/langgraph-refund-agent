@@ -11,6 +11,13 @@ from agent.cases.postgres_repository import PostgresCaseRepository
 from agent.cases.runtime import clear_case_service, configure_case_service
 from agent.cases.service import CaseService
 from agent.database import create_async_connection_pool
+from agent.operations.demo_provider import DemoOrderProvider
+from agent.operations.postgres_repository import PostgresOrderOperationRepository
+from agent.operations.runtime import (
+    clear_operation_dependencies,
+    configure_operation_dependencies,
+)
+from agent.operations.service import OperationService
 
 
 @asynccontextmanager
@@ -21,9 +28,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         await pool.wait()
         configure_case_service(CaseService(PostgresCaseRepository(pool)))
+        configure_operation_dependencies(
+            order_provider=DemoOrderProvider(),
+            operation_service=OperationService(PostgresOrderOperationRepository(pool)),
+        )
         try:
             yield
         finally:
+            clear_operation_dependencies()
             clear_case_service()
     finally:
         await pool.close()
@@ -31,7 +43,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="OpsPilot Internal API",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 app.include_router(support_case_router)

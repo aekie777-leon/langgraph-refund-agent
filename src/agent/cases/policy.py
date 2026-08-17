@@ -42,8 +42,10 @@ _CASE_TYPE_RANK: dict[CaseType, int] = {
     "staff_conduct_complaint": 1,
     "business_escalation": 2,
     "refund_review": 3,
-    "general_support": 4,
-    "other_complaint": 5,
+    "order_operation_review": 4,
+    "delivery_investigation": 5,
+    "general_support": 6,
+    "other_complaint": 7,
 }
 _PRIORITY_RANK: dict[CasePriority, int] = {
     "p0": 0,
@@ -235,6 +237,54 @@ _REASON_POLICIES: dict[HandoffReason, _ReasonPolicy] = {
     "explicit_other_complaint": _ReasonPolicy(
         "other_complaint", "p3", "The user explicitly made another formal complaint."
     ),
+    "order_state_invalid": _ReasonPolicy(
+        "order_operation_review", "p1", "The order state needs manual review."
+    ),
+    "cancellation_fulfillment_processing": _ReasonPolicy(
+        "order_operation_review", "p1", "Cancellation needs warehouse review."
+    ),
+    "cancellation_state_invalid": _ReasonPolicy(
+        "order_operation_review", "p1", "Cancellation state needs manual review."
+    ),
+    "operation_delivery_date_invalid": _ReasonPolicy(
+        "order_operation_review", "p1", "Delivery timing needs manual review."
+    ),
+    "return_eligibility_unknown": _ReasonPolicy(
+        "order_operation_review", "p1", "Return eligibility needs manual review."
+    ),
+    "exchange_eligibility_unknown": _ReasonPolicy(
+        "order_operation_review", "p1", "Exchange eligibility needs manual review."
+    ),
+    "currency_threshold_unconfigured": _ReasonPolicy(
+        "order_operation_review", "p1", "Currency threshold needs manual review."
+    ),
+    "return_manual_amount_review": _ReasonPolicy(
+        "order_operation_review", "p1", "Return amount needs manual review."
+    ),
+    "exchange_inventory_unknown": _ReasonPolicy(
+        "order_operation_review", "p2", "Replacement inventory needs manual review."
+    ),
+    "delivery_data_invalid": _ReasonPolicy(
+        "delivery_investigation", "p1", "Delivery data needs investigation."
+    ),
+    "delivery_tracking_stalled": _ReasonPolicy(
+        "delivery_investigation", "p1", "Tracking has stalled."
+    ),
+    "delivery_overdue_investigation": _ReasonPolicy(
+        "delivery_investigation", "p2", "Delivery delay needs investigation."
+    ),
+    "delivery_failed": _ReasonPolicy(
+        "delivery_investigation", "p1", "Delivery failure needs investigation."
+    ),
+    "delivery_marked_received_dispute": _ReasonPolicy(
+        "delivery_investigation", "p1", "Marked-delivered dispute needs investigation."
+    ),
+    "delivery_damage_claim": _ReasonPolicy(
+        "delivery_investigation", "p1", "Damage claim needs investigation."
+    ),
+    "delivery_other_issue": _ReasonPolicy(
+        "delivery_investigation", "p2", "Delivery issue needs investigation."
+    ),
 }
 
 
@@ -263,6 +313,7 @@ def determine_handoff_policy(policy_input: HandoffPolicyInput) -> HandoffDecisio
         reasons.append("confirmed_human_request")
     if policy_input.explicit_other_complaint:
         reasons.append("explicit_other_complaint")
+    reasons.extend(policy_input.domain_case_reason_codes)
 
     reason_codes = _deduplicate_reasons(reasons)
     if not reason_codes:

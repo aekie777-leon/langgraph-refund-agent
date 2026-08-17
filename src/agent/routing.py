@@ -33,11 +33,22 @@ def route_by_intent_and_risk(state: RefundState) -> str:
         return "formal_complaint"
     if state.get("human_handoff_requested"):
         return "confirm_human_handoff"
-    if decision in ("refund_request", "order_inquiry"):
+    if decision == "support_case_status":
+        return "support_case_status"
+    if decision in (
+        "refund_request",
+        "order_inquiry",
+        "cancellation_request",
+        "return_request",
+        "exchange_request",
+        "delivery_issue",
+    ):
         if risk_level in ("low", "medium"):
             return "confirm_order_priority"
         if risk_level == "none":
-            return "order_query"
+            return "operation_flow" if decision in (
+                "cancellation_request", "return_request", "exchange_request", "delivery_issue"
+            ) else "order_query"
 
     raise ValueError(
         "Unexpected intent/risk combination: "
@@ -69,6 +80,13 @@ def route_after_human_handoff_declined(state: RefundState) -> str:
             return "confirm_order_priority"
         if risk_level == "none":
             return "detect_order"
+    if decision in (
+        "cancellation_request", "return_request", "exchange_request", "delivery_issue"
+    ):
+        if risk_level in ("low", "medium"):
+            return "confirm_order_priority"
+        if risk_level == "none":
+            return "resume_order_flow"
 
     raise ValueError(
         "Cannot resume self-service flow: "
@@ -99,3 +117,15 @@ def route_after_policy(state: RefundState) -> str:
     if not state.get("eligible") or state.get("requires_manual_review"):
         return "finalize"
     return "approval_node"
+
+
+def route_after_order_priority(state: RefundState) -> str:
+    """Resume the appropriate order flow after a risk-priority choice."""
+    decision = state.get("decision")
+    if decision in ("refund_request", "order_inquiry"):
+        return "order_query"
+    if decision in (
+        "cancellation_request", "return_request", "exchange_request", "delivery_issue"
+    ):
+        return "operation_flow"
+    raise ValueError(f"Unexpected order flow decision: {decision!r}")

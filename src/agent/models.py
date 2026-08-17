@@ -8,6 +8,7 @@ from langchain_openai import ChatOpenAI
 
 from agent.schemas import (
     FormalComplaintDetection,
+    OperationRequestExtraction,
     OrderDetection,
     Route,
     SemanticRiskDetection,
@@ -60,3 +61,8 @@ def get_risk_classifier() -> Any:
 def get_formal_complaint_classifier() -> Any:
     """Create the structured-output formal-complaint classifier."""
     return get_llm().with_structured_output(FormalComplaintDetection)
+
+
+def get_operation_request_extractor() -> Any:
+    """Create the structured-output model for narrow operation extraction."""
+    return get_llm().with_structured_output(OperationRequestExtraction)

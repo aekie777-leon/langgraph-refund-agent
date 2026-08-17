@@ -52,6 +52,18 @@ class RefundState(MessagesState, total=False):
     support_case_priority: CasePriority | None
     support_case_status: CaseStatus | None
     support_case_reason_codes: list[HandoffReason]
+    operation_snapshot: dict[str, Any]
+    operation_lookup_success: bool
+    operation_extraction: dict[str, Any]
+    operation_ambiguous: bool
+    operation_outcome: str | None
+    operation_policy_reason_codes: list[str]
+    operation_display_reason: str
+    operation_id: str | None
+    operation_status: str | None
+    operation_service_action: str | None
+    provider_reference: str | None
+    domain_case_reason_codes: list[HandoffReason]
 
 
 def latest_text_user_message(state: RefundState) -> HumanMessage | None:
@@ -92,4 +104,16 @@ def new_turn_state(decision: Intent | None) -> dict[str, Any]:
         "support_case_priority": None,
         "support_case_status": None,
         "support_case_reason_codes": [],
+        "operation_snapshot": {},
+        "operation_lookup_success": False,
+        "operation_extraction": {},
+        "operation_ambiguous": False,
+        "operation_outcome": None,
+        "operation_policy_reason_codes": [],
+        "operation_display_reason": "",
+        "operation_id": None,
+        "operation_status": None,
+        "operation_service_action": None,
+        "provider_reference": None,
+        "domain_case_reason_codes": [],
     }

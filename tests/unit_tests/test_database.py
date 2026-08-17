@@ -84,13 +84,14 @@ def test_discover_migrations_orders_versions_and_hashes_bytes(tmp_path: Path) ->
     assert migrations[0].checksum == sha256(first.read_bytes()).hexdigest()
 
 
-def test_project_migrations_include_support_case_api_indexes() -> None:
+def test_project_migrations_include_current_schema_history() -> None:
     migrations = discover_migrations(MIGRATION_DIRECTORY)
 
     assert [migration.filename for migration in migrations] == [
         "0001_refund_requests.sql",
         "0002_support_cases.sql",
         "0003_support_case_api_indexes.sql",
+        "0004_order_operations.sql",
     ]
 
 

@@ -11,7 +11,7 @@ from agent.state import RefundState
 HandoffDestination = Literal[
     "acknowledge_human_handoff",
     "confirm_order_priority",
-    "detect_order",
+    "resume_order_flow",
     "handle_noncritical_risk",
     "handle_complaint",
 ]

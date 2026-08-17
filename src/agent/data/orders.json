@@ -54,5 +54,34 @@
     "delivery_days_ago": 7,
     "amount": 89.99,
     "refunded": false
+  },
+  "ORD-10008": {
+    "order_id": "ORD-10008",
+    "product_name": "Portable Charger",
+    "status": "confirmed",
+    "amount": 49.99,
+    "refunded": false
+  },
+  "ORD-10009": {
+    "order_id": "ORD-10009",
+    "product_name": "Ergonomic Chair Cushion",
+    "status": "processing",
+    "amount": 79.99,
+    "refunded": false
+  },
+  "ORD-10010": {
+    "order_id": "ORD-10010",
+    "product_name": "Wireless Headphones",
+    "status": "shipped",
+    "amount": 89.99,
+    "refunded": false
+  },
+  "ORD-10011": {
+    "order_id": "ORD-10011",
+    "product_name": "Compact Keyboard",
+    "status": "delivered",
+    "delivery_days_ago": 1,
+    "amount": 59.99,
+    "refunded": false
   }
 }

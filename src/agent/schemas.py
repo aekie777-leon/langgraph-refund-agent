@@ -4,7 +4,18 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
-Intent = Literal["refund_request", "order_inquiry", "complaint"]
+from agent.operations.models import DeliveryIssueType, OperationReason, OperationType
+
+Intent = Literal[
+    "refund_request",
+    "order_inquiry",
+    "complaint",
+    "cancellation_request",
+    "return_request",
+    "exchange_request",
+    "delivery_issue",
+    "support_case_status",
+]
 SemanticRiskLevel = Literal["none", "low", "medium", "high", "critical"]
 SemanticRiskCategory = Literal[
     "self_harm",
@@ -28,6 +39,64 @@ class Route(BaseModel):
             "transferred to a human customer-service representative"
         )
     )
+
+
+class OperationRequestExtraction(BaseModel):
+    """Represent a narrow LLM extraction for the deterministic operation policy."""
+
+    operation_type: OperationType | None = Field(
+        default=None,
+        description=(
+            "Use cancellation, return, or exchange only for one unambiguous "
+            "state-changing request; otherwise return null."
+        ),
+    )
+    reason: OperationReason | None = Field(
+        default=None,
+        description="The normalized reason for the requested cancellation, return, or exchange.",
+    )
+    delivery_issue_type: DeliveryIssueType | None = Field(
+        default=None,
+        description="The normalized delivery issue, only for a delivery issue request.",
+    )
+    replacement_variant_id: str | None = Field(
+        default=None,
+        description="A requested replacement variant ID for an exchange, when supplied.",
+    )
+    investigation_requested: bool = Field(
+        default=False,
+        description="Whether the customer explicitly asks for delivery investigation.",
+    )
+    ambiguous: bool = Field(
+        description="Whether the message asks for multiple incompatible operations."
+    )
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> Self:
+        """Keep extraction facts valid before deterministic policy receives them."""
+        if self.ambiguous:
+            if any(
+                value is not None
+                for value in (
+                    self.operation_type,
+                    self.reason,
+                    self.delivery_issue_type,
+                    self.replacement_variant_id,
+                )
+            ):
+                raise ValueError("ambiguous extraction must not select an operation")
+            return self
+        if self.delivery_issue_type is not None:
+            if self.operation_type is not None or self.reason is not None:
+                raise ValueError("a delivery issue cannot also contain an operation")
+            return self
+        if self.operation_type is None or self.reason is None:
+            raise ValueError("an operation extraction requires operation_type and reason")
+        if self.operation_type == "exchange" and self.replacement_variant_id is None:
+            raise ValueError("an exchange extraction requires replacement_variant_id")
+        if self.operation_type != "exchange" and self.replacement_variant_id is not None:
+            raise ValueError("only exchange may contain replacement_variant_id")
+        return self
 
 
 class FormalComplaintDetection(BaseModel):

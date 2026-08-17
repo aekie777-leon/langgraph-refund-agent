@@ -4,6 +4,7 @@ import pytest
 
 from agent import webapp
 from agent.cases.service import CaseService
+from agent.operations.service import OperationService
 
 pytestmark = pytest.mark.anyio
 
@@ -29,6 +30,7 @@ async def test_lifespan_opens_configures_and_closes_resources(
 ) -> None:
     pool = FakePool()
     configured: list[CaseService] = []
+    configured_operations: list[dict[str, object]] = []
     cleared: list[bool] = []
     monkeypatch.setattr(webapp, "create_async_connection_pool", lambda: pool)
     monkeypatch.setattr(
@@ -36,6 +38,12 @@ async def test_lifespan_opens_configures_and_closes_resources(
         "configure_case_service",
         configured.append,
     )
+    monkeypatch.setattr(
+        webapp,
+        "configure_operation_dependencies",
+        lambda **kwargs: configured_operations.append(kwargs),
+    )
+    monkeypatch.setattr(webapp, "clear_operation_dependencies", lambda: None)
     monkeypatch.setattr(
         webapp,
         "clear_case_service",
@@ -46,6 +54,8 @@ async def test_lifespan_opens_configures_and_closes_resources(
         assert pool.calls == ["open", "wait"]
         assert len(configured) == 1
         assert isinstance(configured[0], CaseService)
+        assert len(configured_operations) == 1
+        assert isinstance(configured_operations[0]["operation_service"], OperationService)
         assert cleared == []
 
     assert pool.calls == ["open", "wait", "close"]

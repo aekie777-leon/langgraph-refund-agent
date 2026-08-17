@@ -4,16 +4,22 @@ import re
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 
 from agent import graph as graph_module
 from agent import models
 from agent.cases.service import CaseService
+from agent.operations.demo_provider import DemoOrderProvider
+from agent.operations.service import OperationService
 from agent.schemas import (
     FormalComplaintDetection,
+    OperationRequestExtraction,
     OrderDetection,
     Route,
     SemanticRiskDetection,
 )
+from tests.operation_support import InMemoryOperationRepository
 from tests.support_cases import InMemoryCaseRepository
 
 pytestmark = pytest.mark.anyio
@@ -39,7 +45,17 @@ class FakeRouter:
         human_handoff_requested = any(
             phrase in text for phrase in ("human agent", "real person", "真人客服")
         )
-        if (
+        if "case status" in text or "support request status" in text:
+            step = "support_case_status"
+        elif "cancel" in text:
+            step = "cancellation_request"
+        elif "exchange" in text:
+            step = "exchange_request"
+        elif any(word in text for word in ("tracking", "not received", "delivery failed")):
+            step = "delivery_issue"
+        elif "return" in text:
+            step = "return_request"
+        elif (
             any(
                 word in text
                 for word in (
@@ -124,6 +140,40 @@ class FakeComplaintModel:
         )
 
 
+class FakeOperationExtractor:
+    """Return a valid fallback extraction when operation nodes are constructed."""
+
+    async def ainvoke(self, messages):
+        text = messages[-1].content.lower()
+        if "cancel" in text and "exchange" in text:
+            return OperationRequestExtraction(ambiguous=True)
+        if "cancel" in text:
+            return OperationRequestExtraction(
+                operation_type="cancellation",
+                reason="no_longer_needed",
+                ambiguous=False,
+            )
+        if "tracking" in text:
+            return OperationRequestExtraction(
+                delivery_issue_type="tracking_stalled",
+                ambiguous=False,
+            )
+        if "exchange" in text:
+            return OperationRequestExtraction(
+                operation_type="exchange",
+                reason="changed_mind",
+                replacement_variant_id=(
+                    "variant-unavailable" if "unavailable" in text else "variant-blue"
+                ),
+                ambiguous=False,
+            )
+        return OperationRequestExtraction(
+            operation_type="return",
+            reason="changed_mind",
+            ambiguous=False,
+        )
+
+
 @pytest.fixture
 def case_repository() -> InMemoryCaseRepository:
     return InMemoryCaseRepository()
@@ -151,9 +201,46 @@ def refund_graph(
         lambda: FakeRiskClassifier(),
     )
     monkeypatch.setattr(models, "get_llm", lambda: FakeComplaintModel())
+    monkeypatch.setattr(
+        models,
+        "get_operation_request_extractor",
+        lambda: FakeOperationExtractor(),
+    )
     case_service = CaseService(case_repository)
+    operation_service = OperationService(InMemoryOperationRepository())
     return graph_module.build_graph(
         case_service_provider=lambda: case_service,
+        order_provider=DemoOrderProvider(),
+        operation_service=operation_service,
+    )
+
+
+@pytest.fixture
+def resumable_operation_graph(
+    monkeypatch: pytest.MonkeyPatch,
+    case_repository: InMemoryCaseRepository,
+):
+    monkeypatch.setattr(models, "get_order_detector", lambda: FakeOrderDetector())
+    monkeypatch.setattr(models, "get_router", lambda: FakeRouter())
+    monkeypatch.setattr(
+        models,
+        "get_formal_complaint_classifier",
+        lambda: FakeFormalComplaintClassifier(),
+    )
+    monkeypatch.setattr(models, "get_risk_classifier", lambda: FakeRiskClassifier())
+    monkeypatch.setattr(models, "get_llm", lambda: FakeComplaintModel())
+    monkeypatch.setattr(
+        models,
+        "get_operation_request_extractor",
+        lambda: FakeOperationExtractor(),
+    )
+    case_service = CaseService(case_repository)
+    operation_service = OperationService(InMemoryOperationRepository())
+    return graph_module.build_graph(
+        case_service_provider=lambda: case_service,
+        order_provider=DemoOrderProvider(),
+        operation_service=operation_service,
+        checkpointer=MemorySaver(),
     )
 
 
@@ -544,3 +631,255 @@ async def test_graph_ignores_a_retried_source_message(
     assert duplicate["support_case_action"] == "duplicate_ignored"
     assert duplicate["support_case_id"] == first["support_case_id"]
     assert len(case_repository.events) == 1
+
+
+async def test_graph_interrupts_before_an_automatic_cancellation(
+    resumable_operation_graph,
+) -> None:
+    result = await resumable_operation_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="cancellation-message",
+                    content="Please cancel ORD-10008.",
+                )
+            ]
+        },
+        config=_run_config("cancellation-thread"),
+    )
+
+    assert result["__interrupt__"][0].value["type"] == "order_operation_confirmation"
+
+
+async def test_graph_confirms_manual_cancellation_and_creates_case(
+    resumable_operation_graph,
+) -> None:
+    config = _run_config("manual-cancellation-thread")
+    initial = await resumable_operation_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="manual-cancellation-message",
+                    content="Please cancel ORD-10009.",
+                )
+            ]
+        },
+        config=config,
+    )
+    result = await resumable_operation_graph.ainvoke(Command(resume=True), config=config)
+
+    assert initial["__interrupt__"]
+    assert result["operation_status"] == "manual_review"
+    assert result["support_case_type"] == "order_operation_review"
+    assert result["support_case_priority"] == "p1"
+    assert result["support_case_id"] is not None
+
+
+async def test_graph_confirms_eligible_return_without_a_support_case(
+    resumable_operation_graph,
+) -> None:
+    config = _run_config("eligible-return-thread")
+    initial = await resumable_operation_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="eligible-return-message",
+                    content="Please return ORD-10001.",
+                )
+            ]
+        },
+        config=config,
+    )
+    result = await resumable_operation_graph.ainvoke(Command(resume=True), config=config)
+
+    assert initial["__interrupt__"]
+    assert result["operation_outcome"] == "eligible"
+    assert result["operation_status"] == "submitted"
+    assert result["support_case_action"] == "not_created"
+
+
+async def test_graph_confirms_manual_return_and_creates_p1_case(
+    resumable_operation_graph,
+) -> None:
+    config = _run_config("manual-return-thread")
+    initial = await resumable_operation_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="manual-return-message",
+                    content="Please return ORD-10002.",
+                )
+            ]
+        },
+        config=config,
+    )
+    result = await resumable_operation_graph.ainvoke(Command(resume=True), config=config)
+
+    assert initial["__interrupt__"]
+    assert result["operation_status"] == "manual_review"
+    assert result["support_case_type"] == "order_operation_review"
+    assert result["support_case_priority"] == "p1"
+
+
+async def test_graph_confirms_available_exchange_without_a_support_case(
+    resumable_operation_graph,
+) -> None:
+    config = _run_config("available-exchange-thread")
+    initial = await resumable_operation_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="available-exchange-message",
+                    content="Please exchange ORD-10001.",
+                )
+            ]
+        },
+        config=config,
+    )
+    result = await resumable_operation_graph.ainvoke(Command(resume=True), config=config)
+
+    assert initial["__interrupt__"]
+    assert result["operation_outcome"] == "eligible"
+    assert result["operation_status"] == "submitted"
+    assert result["support_case_action"] == "not_created"
+
+
+async def test_graph_rejects_exchange_when_replacement_is_unavailable(refund_graph) -> None:
+    result = await refund_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="unavailable-exchange-message",
+                    content="Please exchange ORD-10001 for an unavailable variant.",
+                )
+            ]
+        },
+        config=_run_config("unavailable-exchange-thread"),
+    )
+
+    assert result["operation_outcome"] == "rejected"
+    assert result["operation_id"] is None
+    assert result["support_case_action"] == "not_created"
+    assert "replacement is unavailable" in result["messages"][-1].content
+
+
+async def test_graph_asks_to_choose_one_ambiguous_operation(refund_graph) -> None:
+    result = await refund_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="ambiguous-operation-message",
+                    content="Please cancel and exchange ORD-10001.",
+                )
+            ]
+        },
+        config=_run_config("ambiguous-operation-thread"),
+    )
+
+    assert result["operation_outcome"] == "ambiguous"
+    assert result["operation_id"] is None
+    assert result["support_case_action"] == "not_created"
+    assert "choose one operation" in result["messages"][-1].content
+
+
+async def test_graph_declines_pending_operation_without_submitting_or_creating_case(
+    resumable_operation_graph,
+) -> None:
+    config = _run_config("declined-operation-thread")
+    initial = await resumable_operation_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="declined-operation-message",
+                    content="Please cancel ORD-10008.",
+                )
+            ]
+        },
+        config=config,
+    )
+    result = await resumable_operation_graph.ainvoke(Command(resume=False), config=config)
+
+    assert initial["__interrupt__"]
+    assert result["operation_status"] == "cancelled_by_customer"
+    assert result["provider_reference"] is None
+    assert result["support_case_action"] == "not_created"
+
+
+async def test_graph_confirms_delivery_case_without_order_operation(
+    resumable_operation_graph,
+) -> None:
+    config = _run_config("tracking-thread")
+    initial = await resumable_operation_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="tracking-message",
+                    content="Tracking for ORD-10010 has not updated.",
+                )
+            ]
+        },
+        config=config,
+    )
+    result = await resumable_operation_graph.ainvoke(Command(resume=True), config=config)
+
+    assert initial["__interrupt__"][0].value["type"] == "order_operation_confirmation"
+    assert result["operation_outcome"] == "manual_review"
+    assert result["operation_id"] is None
+    assert result["support_case_type"] == "delivery_investigation"
+    assert result["support_case_priority"] == "p1"
+
+
+async def test_graph_declines_delivery_investigation_without_creating_case(
+    resumable_operation_graph,
+) -> None:
+    config = _run_config("declined-delivery-thread")
+    initial = await resumable_operation_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="declined-delivery-message",
+                    content="Tracking for ORD-10010 has not updated.",
+                )
+            ]
+        },
+        config=config,
+    )
+    result = await resumable_operation_graph.ainvoke(Command(resume=False), config=config)
+
+    assert initial["__interrupt__"]
+    assert result["operation_id"] is None
+    assert result["operation_status"] == "cancelled"
+    assert result["support_case_action"] == "not_created"
+
+
+async def test_graph_lists_support_cases_only_for_the_current_thread(
+    resumable_operation_graph,
+) -> None:
+    config = _run_config("case-status-thread")
+    initial = await resumable_operation_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="status-tracking-message",
+                    content="Tracking for ORD-10010 has not updated.",
+                )
+            ]
+        },
+        config=config,
+    )
+    assert initial["__interrupt__"]
+    await resumable_operation_graph.ainvoke(Command(resume=True), config=config)
+    result = await resumable_operation_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    id="case-status-message",
+                    content="What is my support request status?",
+                )
+            ]
+        },
+        config=config,
+    )
+
+    assert "delivery_investigation" in result["messages"][-1].content
+    assert "Support cases for this conversation" in result["messages"][-1].content
