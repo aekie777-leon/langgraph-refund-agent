@@ -3,6 +3,7 @@
 from typing import Protocol
 from uuid import UUID
 
+from agent.auth.models import AccessScope
 from agent.operations.models import OrderOperation, OrderOperationEvent
 
 
@@ -33,12 +34,17 @@ class OperationPersistenceError(RuntimeError):
 class OperationRepository(Protocol):
     """Define storage operations required by the order-operation service."""
 
-    async def get_operation(self, operation_id: UUID) -> OrderOperation | None:
-        """Return an operation by ID."""
+    async def get_operation(
+        self,
+        scope: AccessScope,
+        operation_id: UUID,
+    ) -> OrderOperation | None:
+        """Return an operation by ID within the caller's access scope."""
         ...
 
     async def find_by_source_message(
         self,
+        scope: AccessScope,
         *,
         thread_id: str,
         source_message_id: str,
@@ -48,17 +54,23 @@ class OperationRepository(Protocol):
 
     async def find_event_by_idempotency_key(
         self,
+        scope: AccessScope,
         idempotency_key: str,
     ) -> OrderOperationEvent | None:
         """Find a previously recorded immutable operation event."""
         ...
 
-    async def find_active_by_order_id(self, order_id: str) -> OrderOperation | None:
+    async def find_active_by_order_id(
+        self,
+        scope: AccessScope,
+        order_id: str,
+    ) -> OrderOperation | None:
         """Find the unresolved operation currently blocking an order."""
         ...
 
     async def create_operation_with_events(
         self,
+        scope: AccessScope,
         *,
         operation: OrderOperation,
         events: tuple[OrderOperationEvent, ...],
@@ -68,6 +80,7 @@ class OperationRepository(Protocol):
 
     async def update_operation_with_events(
         self,
+        scope: AccessScope,
         *,
         operation: OrderOperation,
         events: tuple[OrderOperationEvent, ...],

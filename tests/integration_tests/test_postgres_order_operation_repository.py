@@ -19,10 +19,12 @@ from agent.operations.models import (
 )
 from agent.operations.postgres_repository import PostgresOrderOperationRepository
 from agent.operations.service import OperationService
+from tests.fakes.identity import make_scope
 from tests.fakes.operations import InMemoryOrderProvider
 
 pytestmark = [pytest.mark.anyio, pytest.mark.postgres]
 NOW = datetime(2026, 8, 17, 8, 0, tzinfo=UTC)
+SCOPE = make_scope("customer")
 
 
 @pytest.fixture
@@ -80,6 +82,8 @@ def _snapshot() -> OrderSnapshot:
         delivered_at=datetime(2026, 8, 10, tzinfo=UTC),
         return_eligible=True,
         exchange_eligible=True,
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
     )
 
 
@@ -107,31 +111,36 @@ async def test_operation_round_trips_and_confirmation_is_idempotent(
         order_id="ORD-10001",
         operation_type="return",
         reason="damaged_item",
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
     )
 
     created = await service.create_pending_operation(
+        SCOPE,
         request=request,
         snapshot=_snapshot(),
         decision=_decision(),
         request_excerpt="Please return the damaged item.",
     )
     confirmed = await service.submit_confirmed_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="confirm-1",
-        actor="customer",
         provider=provider,
     )
     duplicate = await service.submit_confirmed_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="confirm-1",
-        actor="customer",
         provider=provider,
     )
 
-    stored = await repository.get_operation(created.operation.operation_id)
+    stored = await repository.get_operation(SCOPE, created.operation.operation_id)
     assert stored == confirmed.operation
     assert stored is not None
     assert stored.status == "submitted"
+    assert stored.customer_id == "customer-a"
+    assert stored.tenant_id == "tenant-demo"
     assert duplicate.action == "status_unchanged"
 
 
@@ -148,16 +157,20 @@ async def test_active_order_index_blocks_another_pending_operation(
         order_id="ORD-10001",
         operation_type="return",
         reason="damaged_item",
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
     )
     second = first.model_copy(update={"source_message_id": "message-2"})
 
     await service.create_pending_operation(
+        SCOPE,
         request=first,
         snapshot=_snapshot(),
         decision=_decision(),
         request_excerpt="Please return the damaged item.",
     )
     result = await service.create_pending_operation(
+        SCOPE,
         request=second,
         snapshot=_snapshot(),
         decision=_decision(),

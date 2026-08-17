@@ -9,6 +9,8 @@ from psycopg import errors
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
+from agent.auth.models import AccessScope
+from agent.auth.visibility import case_visibility
 from agent.cases.models import (
     CaseListQuery,
     CaseType,
@@ -45,7 +47,11 @@ _CASE_COLUMNS = """
     on_hold_reason,
     created_at,
     updated_at,
-    version
+    version,
+    customer_id,
+    tenant_id,
+    created_by,
+    assigned_agent_id
 """
 
 _EVENT_COLUMNS = """
@@ -64,40 +70,22 @@ _EVENT_COLUMNS = """
     previous_status,
     current_status,
     on_hold_reason,
+    previous_assigned_agent_id,
+    current_assigned_agent_id,
     actor,
+    customer_id,
+    tenant_id,
     created_at
 """
 
 _INSERT_CASE = f"""
     INSERT INTO case_management.support_cases ({_CASE_COLUMNS})
-    VALUES (
-        %s, %s, %s, %s, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s, %s, %s, %s
-    )
+    VALUES ({', '.join(['%s'] * 20)})
 """
 
 _INSERT_EVENT = f"""
     INSERT INTO case_management.support_case_events ({_EVENT_COLUMNS})
-    VALUES (
-        %s, %s, %s, %s, %s, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s, %s, %s, %s
-    )
-"""
-
-_UPDATE_CASE = """
-    UPDATE case_management.support_cases
-    SET
-        order_id = %s,
-        priority = %s,
-        status = %s,
-        risk_level = %s,
-        risk_categories = %s,
-        reason_codes = %s,
-        display_reason = %s,
-        on_hold_reason = %s,
-        updated_at = %s,
-        version = %s
-    WHERE case_id = %s AND version = %s
+    VALUES ({', '.join(['%s'] * 21)})
 """
 
 
@@ -130,6 +118,10 @@ def _case_values(case: SupportCase) -> tuple[Any, ...]:
         case.created_at,
         case.updated_at,
         case.version,
+        case.customer_id,
+        case.tenant_id,
+        case.created_by,
+        case.assigned_agent_id,
     )
 
 
@@ -151,29 +143,12 @@ def _event_values(event: SupportCaseEvent) -> tuple[Any, ...]:
         event.previous_status,
         event.current_status,
         event.on_hold_reason,
+        event.previous_assigned_agent_id,
+        event.current_assigned_agent_id,
         event.actor,
+        event.customer_id,
+        event.tenant_id,
         event.created_at,
-    )
-
-
-def _update_values(
-    case: SupportCase,
-    expected_version: int,
-) -> tuple[Any, ...]:
-    """Return SQL parameters for one optimistic-lock update."""
-    return (
-        case.order_id,
-        case.priority,
-        case.status,
-        case.risk_level,
-        list(case.risk_categories),
-        list(case.reason_codes),
-        case.display_reason,
-        case.on_hold_reason,
-        case.updated_at,
-        case.version,
-        case.case_id,
-        expected_version,
     )
 
 
@@ -195,11 +170,13 @@ def _raise_unique_violation(
 
 
 def _case_filter_sql(
+    scope: AccessScope,
     query: CaseListQuery,
 ) -> tuple[str, list[Any]]:
-    """Build a parameterized WHERE clause from validated filter fields."""
-    clauses: list[str] = []
-    parameters: list[Any] = []
+    """Build a parameterized WHERE clause combining visibility and filters."""
+    visibility, visibility_params = case_visibility(scope)
+    clauses: list[str] = [visibility]
+    parameters: list[Any] = list(visibility_params)
 
     for column, value in (
         ("status", query.status),
@@ -212,8 +189,6 @@ def _case_filter_sql(
             clauses.append(f"{column} = %s")
             parameters.append(value)
 
-    if not clauses:
-        return "", parameters
     return f"WHERE {' AND '.join(clauses)}", parameters
 
 
@@ -224,48 +199,59 @@ class PostgresCaseRepository(CaseRepository):
         """Store a pool whose lifecycle is owned by the application."""
         self._pool = pool
 
-    async def get_case(self, case_id: UUID) -> SupportCase | None:
-        """Return a case by ID."""
+    async def get_case(self, scope: AccessScope, case_id: UUID) -> SupportCase | None:
+        """Return a case by ID within the caller's access scope."""
+        visibility, parameters = case_visibility(scope)
         query = f"""
             SELECT {_CASE_COLUMNS}
             FROM case_management.support_cases
-            WHERE case_id = %s
+            WHERE case_id = %s AND {visibility}
         """
-        return await self._fetch_case(query, (case_id,))
+        return await self._fetch_case(query, (case_id, *parameters))
 
     async def find_by_source_message(
         self,
+        scope: AccessScope,
         *,
         thread_id: str,
         source_message_id: str,
     ) -> SupportCase | None:
         """Find the case already associated with a triggering message."""
+        visibility, parameters = case_visibility(scope, prefix="cases")
+        case_columns = ", ".join(
+            f"cases.{column.strip()}" for column in _CASE_COLUMNS.split(",")
+        )
         query = f"""
-            SELECT {", ".join(f"cases.{column.strip()}" for column in _CASE_COLUMNS.split(","))}
+            SELECT {case_columns}
             FROM case_management.support_cases AS cases
             JOIN case_management.support_case_events AS events
               ON events.case_id = cases.case_id
             WHERE cases.thread_id = %s
               AND events.source_message_id = %s
+              AND {visibility}
             ORDER BY events.created_at, events.event_id
             LIMIT 1
         """
-        return await self._fetch_case(query, (thread_id, source_message_id))
+        return await self._fetch_case(
+            query,
+            (thread_id, source_message_id, *parameters),
+        )
 
     async def find_event_by_idempotency_key(
         self,
+        scope: AccessScope,
         idempotency_key: str,
     ) -> SupportCaseEvent | None:
-        """Find a previously recorded operation event."""
+        """Find a previously recorded operation event within the caller's tenant."""
         query = f"""
             SELECT {_EVENT_COLUMNS}
             FROM case_management.support_case_events
-            WHERE idempotency_key = %s
+            WHERE tenant_id = %s AND idempotency_key = %s
         """
         try:
             async with self._pool.connection() as connection:
                 async with connection.cursor(row_factory=dict_row) as cursor:
-                    await cursor.execute(query, (idempotency_key,))
+                    await cursor.execute(query, (scope.tenant_id, idempotency_key))
                     row = await cursor.fetchone()
         except (psycopg.Error, PoolTimeout) as error:
             raise CasePersistenceError("Failed to read support-case event") from error
@@ -273,28 +259,32 @@ class PostgresCaseRepository(CaseRepository):
 
     async def find_unresolved_case(
         self,
+        scope: AccessScope,
         *,
         thread_id: str,
         case_type: CaseType,
     ) -> SupportCase | None:
         """Find an unresolved case with the same thread and type."""
+        visibility, parameters = case_visibility(scope)
         query = f"""
             SELECT {_CASE_COLUMNS}
             FROM case_management.support_cases
             WHERE thread_id = %s
               AND case_type = %s
               AND status IN ('open', 'in_progress', 'on_hold')
+              AND {visibility}
             ORDER BY created_at, case_id
             LIMIT 1
         """
-        return await self._fetch_case(query, (thread_id, case_type))
+        return await self._fetch_case(query, (thread_id, case_type, *parameters))
 
     async def list_cases(
         self,
+        scope: AccessScope,
         query: CaseListQuery,
     ) -> SupportCasePage:
         """Return a filtered page ordered as an operational work queue."""
-        where_sql, parameters = _case_filter_sql(query)
+        where_sql, parameters = _case_filter_sql(scope, query)
         count_query = f"""
             SELECT COUNT(*) AS total
             FROM case_management.support_cases
@@ -339,6 +329,7 @@ class PostgresCaseRepository(CaseRepository):
 
     async def list_case_events(
         self,
+        scope: AccessScope,
         *,
         case_id: UUID,
         limit: int,
@@ -348,12 +339,12 @@ class PostgresCaseRepository(CaseRepository):
         count_query = """
             SELECT COUNT(*) AS total
             FROM case_management.support_case_events
-            WHERE case_id = %s
+            WHERE tenant_id = %s AND case_id = %s
         """
         page_query = f"""
             SELECT {_EVENT_COLUMNS}
             FROM case_management.support_case_events
-            WHERE case_id = %s
+            WHERE tenant_id = %s AND case_id = %s
             ORDER BY created_at, event_id
             LIMIT %s OFFSET %s
         """
@@ -361,11 +352,11 @@ class PostgresCaseRepository(CaseRepository):
         try:
             async with self._pool.connection() as connection:
                 async with connection.cursor(row_factory=dict_row) as cursor:
-                    await cursor.execute(count_query, (case_id,))
+                    await cursor.execute(count_query, (scope.tenant_id, case_id))
                     count_row = await cursor.fetchone()
                     await cursor.execute(
                         page_query,
-                        (case_id, limit, offset),
+                        (scope.tenant_id, case_id, limit, offset),
                     )
                     rows = await cursor.fetchall()
         except (psycopg.Error, PoolTimeout) as error:
@@ -381,11 +372,14 @@ class PostgresCaseRepository(CaseRepository):
 
     async def create_case_with_event(
         self,
+        scope: AccessScope,
         *,
         case: SupportCase,
         event: SupportCaseEvent,
     ) -> None:
         """Atomically create a case and its first event."""
+        _validate_case_ownership(scope, case)
+        _validate_event_ownership(scope, event)
         try:
             async with self._pool.connection() as connection:
                 async with connection.transaction():
@@ -398,6 +392,7 @@ class PostgresCaseRepository(CaseRepository):
 
     async def update_case_with_event(
         self,
+        scope: AccessScope,
         *,
         case: SupportCase,
         event: SupportCaseEvent,
@@ -406,14 +401,47 @@ class PostgresCaseRepository(CaseRepository):
         """Atomically update a case and append an event."""
         if case.version != expected_version + 1:
             raise ValueError("case.version must equal expected_version + 1")
+        _validate_case_ownership(scope, case)
+        _validate_event_ownership(scope, event)
+
+        visibility, visibility_params = case_visibility(scope)
+        update_sql = f"""
+            UPDATE case_management.support_cases
+            SET
+                order_id = %s,
+                priority = %s,
+                status = %s,
+                risk_level = %s,
+                risk_categories = %s,
+                reason_codes = %s,
+                display_reason = %s,
+                on_hold_reason = %s,
+                assigned_agent_id = %s,
+                updated_at = %s,
+                version = %s
+            WHERE case_id = %s AND version = %s AND {visibility}
+        """
+        values = (
+            case.order_id,
+            case.priority,
+            case.status,
+            case.risk_level,
+            list(case.risk_categories),
+            list(case.reason_codes),
+            case.display_reason,
+            case.on_hold_reason,
+            case.assigned_agent_id,
+            case.updated_at,
+            case.version,
+            case.case_id,
+            expected_version,
+            *visibility_params,
+        )
 
         try:
             async with self._pool.connection() as connection:
                 async with connection.transaction():
-                    result = await connection.execute(
-                        _UPDATE_CASE,
-                        _update_values(case, expected_version),
-                    )
+                    result = await connection.execute(update_sql, values)
                     if result.rowcount != 1:
                         raise ConcurrentCaseUpdateError(str(case.case_id))
                     await connection.execute(_INSERT_EVENT, _event_values(event))
@@ -438,3 +466,17 @@ class PostgresCaseRepository(CaseRepository):
         except (psycopg.Error, PoolTimeout) as error:
             raise CasePersistenceError("Failed to read support case") from error
         return None if row is None else _case_from_row(row)
+
+
+def _validate_case_ownership(scope: AccessScope, case: SupportCase) -> None:
+    """Reject a case whose ownership does not match the caller scope."""
+    if case.tenant_id != scope.tenant_id:
+        raise ValueError("case tenant_id must match the access scope")
+    if scope.role == "customer" and case.customer_id != scope.customer_id:
+        raise ValueError("case customer_id must match the access scope")
+
+
+def _validate_event_ownership(scope: AccessScope, event: SupportCaseEvent) -> None:
+    """Reject an event whose ownership does not match the caller scope."""
+    if event.tenant_id != scope.tenant_id:
+        raise ValueError("event tenant_id must match the access scope")

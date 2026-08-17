@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 from typing import TypeVar
 from uuid import UUID, uuid4
 
+from agent.auth.models import AccessScope
+from agent.auth.rbac import has_any_permission, has_permission
+from agent.auth.visibility import ForbiddenError
 from agent.cases.models import (
+    RESERVED_AGENT_IDS,
     CaseListQuery,
     CaseServiceResult,
     CaseStatus,
@@ -91,35 +95,41 @@ class CaseService:
         self._id_factory = id_factory
         self._max_write_attempts = max_write_attempts
 
-    async def get_case(self, case_id: UUID) -> SupportCase:
+    async def get_case(self, scope: AccessScope, case_id: UUID) -> SupportCase:
         """Return one support case or raise when it does not exist."""
-        case = await self._repository.get_case(case_id)
+        self._require_case_read(scope)
+        case = await self._repository.get_case(scope, case_id)
         if case is None:
             raise CaseNotFoundError(str(case_id))
         return case
 
     async def list_cases(
         self,
+        scope: AccessScope,
         query: CaseListQuery,
     ) -> SupportCasePage:
-        """Return support cases matching validated filters."""
-        return await self._repository.list_cases(query)
+        """Return support cases matching validated filters within scope."""
+        self._require_case_read(scope)
+        return await self._repository.list_cases(scope, query)
 
     async def list_case_events(
         self,
+        scope: AccessScope,
         *,
         case_id: UUID,
         limit: int = 100,
         offset: int = 0,
     ) -> SupportCaseEventPage:
         """Return the immutable event timeline for an existing case."""
+        self._require_case_read(scope)
         if limit < 1 or limit > 200:
             raise ValueError("limit must be between 1 and 200")
         if offset < 0:
             raise ValueError("offset must not be negative")
-        if await self._repository.get_case(case_id) is None:
+        if await self._repository.get_case(scope, case_id) is None:
             raise CaseNotFoundError(str(case_id))
         return await self._repository.list_case_events(
+            scope,
             case_id=case_id,
             limit=limit,
             offset=offset,
@@ -127,11 +137,14 @@ class CaseService:
 
     async def record_handoff(
         self,
+        scope: AccessScope,
         *,
         trigger: CaseTrigger,
         decision: HandoffDecision,
     ) -> CaseServiceResult:
         """Create a case or append the trigger to a matching unresolved case."""
+        if scope.customer_id is None:
+            raise ValueError("only customers may create support cases")
         if not decision.should_create_case:
             return CaseServiceResult(action="not_created")
 
@@ -141,6 +154,7 @@ class CaseService:
         last_conflict: RuntimeError | None = None
         for _attempt in range(self._max_write_attempts):
             duplicate = await self._repository.find_by_source_message(
+                scope,
                 thread_id=trigger.thread_id,
                 source_message_id=trigger.source_message_id,
             )
@@ -151,6 +165,7 @@ class CaseService:
                 )
 
             existing = await self._repository.find_unresolved_case(
+                scope,
                 thread_id=trigger.thread_id,
                 case_type=decision.case_type,
             )
@@ -158,10 +173,12 @@ class CaseService:
             try:
                 if existing is None:
                     return await self._create_case(
+                        scope,
                         trigger=trigger,
                         decision=decision,
                     )
                 return await self._append_trigger(
+                    scope,
                     existing=existing,
                     trigger=trigger,
                     decision=decision,
@@ -180,27 +197,27 @@ class CaseService:
 
     async def change_status(
         self,
+        scope: AccessScope,
         *,
         case_id: UUID,
         target_status: CaseStatus,
         request_id: str,
-        actor: str,
         on_hold_reason: OnHoldReason | None = None,
     ) -> CaseServiceResult:
         """Change case status and record an immutable audit event."""
+        self._require_case_update(scope)
         request_id = request_id.strip()
-        actor = actor.strip()
         if not request_id:
             raise ValueError("request_id must not be empty")
-        if not actor:
-            raise ValueError("actor must not be empty")
+        actor = scope.identity
 
         idempotency_key = f"status:{case_id}:{request_id}"
         previous_event = await self._repository.find_event_by_idempotency_key(
-            idempotency_key
+            scope,
+            idempotency_key,
         )
         if previous_event is not None:
-            previous_case = await self._repository.get_case(previous_event.case_id)
+            previous_case = await self._repository.get_case(scope, previous_event.case_id)
             if previous_case is None:
                 raise CaseNotFoundError(str(previous_event.case_id))
             return CaseServiceResult(
@@ -210,7 +227,7 @@ class CaseService:
 
         last_conflict: RuntimeError | None = None
         for _attempt in range(self._max_write_attempts):
-            current = await self._repository.get_case(case_id)
+            current = await self._repository.get_case(scope, case_id)
             if current is None:
                 raise CaseNotFoundError(str(case_id))
 
@@ -243,22 +260,27 @@ class CaseService:
                 current_status=target_status,
                 on_hold_reason=on_hold_reason,
                 actor=actor,
+                customer_id=current.customer_id,
+                tenant_id=current.tenant_id,
                 created_at=now,
             )
 
             try:
                 await self._repository.update_case_with_event(
+                    scope,
                     case=updated,
                     event=event,
                     expected_version=current.version,
                 )
             except DuplicateIdempotencyKeyError:
                 duplicate_event = await self._repository.find_event_by_idempotency_key(
-                    idempotency_key
+                    scope,
+                    idempotency_key,
                 )
                 if duplicate_event is not None:
                     duplicate_case = await self._repository.get_case(
-                        duplicate_event.case_id
+                        scope,
+                        duplicate_event.case_id,
                     )
                     if duplicate_case is not None:
                         return CaseServiceResult(
@@ -281,8 +303,105 @@ class CaseService:
             "Could not change case status after concurrent write conflicts"
         ) from last_conflict
 
+    async def assign_case(
+        self,
+        scope: AccessScope,
+        *,
+        case_id: UUID,
+        agent_id: str,
+        request_id: str,
+    ) -> CaseServiceResult:
+        """Assign a case to a support agent and record an immutable audit event."""
+        if not has_permission(scope, "cases:assign"):
+            raise ForbiddenError("the caller cannot assign support cases")
+        agent_id = self._validate_agent_id(agent_id)
+        request_id = request_id.strip()
+        if not request_id:
+            raise ValueError("request_id must not be empty")
+        actor = scope.identity
+
+        idempotency_key = f"assign:{case_id}:{request_id}"
+        previous_event = await self._repository.find_event_by_idempotency_key(
+            scope,
+            idempotency_key,
+        )
+        if previous_event is not None:
+            previous_case = await self._repository.get_case(
+                scope,
+                previous_event.case_id,
+            )
+            if previous_case is None:
+                raise CaseNotFoundError(str(previous_event.case_id))
+            return CaseServiceResult(action="status_unchanged", case=previous_case)
+
+        last_conflict: RuntimeError | None = None
+        for _attempt in range(self._max_write_attempts):
+            current = await self._repository.get_case(scope, case_id)
+            if current is None:
+                raise CaseNotFoundError(str(case_id))
+
+            if current.assigned_agent_id == agent_id:
+                return CaseServiceResult(action="status_unchanged", case=current)
+
+            now = self._clock()
+            updated = SupportCase.model_validate(
+                {
+                    **current.model_dump(mode="python"),
+                    "assigned_agent_id": agent_id,
+                    "updated_at": now,
+                    "version": current.version + 1,
+                }
+            )
+            event = SupportCaseEvent(
+                event_id=self._id_factory(),
+                idempotency_key=idempotency_key,
+                case_id=current.case_id,
+                event_type="assigned",
+                previous_assigned_agent_id=current.assigned_agent_id,
+                current_assigned_agent_id=agent_id,
+                actor=actor,
+                customer_id=current.customer_id,
+                tenant_id=current.tenant_id,
+                created_at=now,
+            )
+
+            try:
+                await self._repository.update_case_with_event(
+                    scope,
+                    case=updated,
+                    event=event,
+                    expected_version=current.version,
+                )
+            except DuplicateIdempotencyKeyError:
+                duplicate_event = await self._repository.find_event_by_idempotency_key(
+                    scope,
+                    idempotency_key,
+                )
+                if duplicate_event is not None:
+                    duplicate_case = await self._repository.get_case(
+                        scope,
+                        duplicate_event.case_id,
+                    )
+                    if duplicate_case is not None:
+                        return CaseServiceResult(
+                            action="status_unchanged",
+                            case=duplicate_case,
+                        )
+                last_conflict = DuplicateIdempotencyKeyError(idempotency_key)
+                continue
+            except ConcurrentCaseUpdateError as error:
+                last_conflict = error
+                continue
+
+            return CaseServiceResult(action="assigned", case=updated, event=event)
+
+        raise ConcurrentCaseUpdateError(
+            "Could not assign the support case after concurrent write conflicts"
+        ) from last_conflict
+
     async def _create_case(
         self,
+        scope: AccessScope,
         *,
         trigger: CaseTrigger,
         decision: HandoffDecision,
@@ -290,6 +409,7 @@ class CaseService:
         """Create a case and its initial event as one repository operation."""
         assert decision.case_type is not None
         assert decision.priority is not None
+        assert scope.customer_id is not None
 
         now = self._clock()
         case_id = self._id_factory()
@@ -309,6 +429,9 @@ class CaseService:
             created_at=now,
             updated_at=now,
             version=1,
+            customer_id=scope.customer_id,
+            tenant_id=scope.tenant_id,
+            created_by=scope.identity,
         )
         event = SupportCaseEvent(
             event_id=self._id_factory(),
@@ -324,14 +447,17 @@ class CaseService:
             current_priority=decision.priority,
             current_status="open",
             actor="system",
+            customer_id=scope.customer_id,
+            tenant_id=scope.tenant_id,
             created_at=now,
         )
 
-        await self._repository.create_case_with_event(case=case, event=event)
+        await self._repository.create_case_with_event(scope, case=case, event=event)
         return CaseServiceResult(action="created", case=case, event=event)
 
     async def _append_trigger(
         self,
+        scope: AccessScope,
         *,
         existing: SupportCase,
         trigger: CaseTrigger,
@@ -384,10 +510,13 @@ class CaseService:
             current_priority=merged_priority,
             current_status=existing.status,
             actor="system",
+            customer_id=existing.customer_id,
+            tenant_id=existing.tenant_id,
             created_at=now,
         )
 
         await self._repository.update_case_with_event(
+            scope,
             case=updated,
             event=event,
             expected_version=existing.version,
@@ -413,3 +542,38 @@ class CaseService:
             raise ValueError("on_hold_reason is required when putting a case on hold")
         if target_status != "on_hold" and on_hold_reason is not None:
             raise ValueError("on_hold_reason is only valid for the on_hold status")
+
+    @staticmethod
+    def _require_case_read(scope: AccessScope) -> None:
+        """Reject callers without any case-read permission."""
+        if not has_any_permission(
+            scope,
+            "cases:read:own",
+            "cases:read:assigned",
+            "cases:read:all",
+        ):
+            raise ForbiddenError("the caller cannot read support cases")
+
+    @staticmethod
+    def _require_case_update(scope: AccessScope) -> None:
+        """Reject callers without any case-update permission."""
+        if not has_any_permission(
+            scope,
+            "cases:update:assigned",
+            "cases:update:all",
+        ):
+            raise ForbiddenError("the caller cannot update support cases")
+
+    @staticmethod
+    def _validate_agent_id(agent_id: str) -> str:
+        """Normalize and validate a support-agent identifier."""
+        normalized = agent_id.strip()
+        if not normalized:
+            raise ValueError("agent_id must not be empty")
+        if len(normalized) > 128:
+            raise ValueError("agent_id must not exceed 128 characters")
+        if ":" in normalized:
+            raise ValueError("agent_id must not contain ':'")
+        if normalized in RESERVED_AGENT_IDS:
+            raise ValueError(f"agent_id is reserved: {normalized}")
+        return normalized

@@ -8,6 +8,8 @@ from psycopg import errors
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
+from agent.auth.models import AccessScope
+from agent.auth.visibility import customer_owned_visibility
 from agent.operations.models import OrderOperation, OrderOperationEvent
 from agent.operations.repository import (
     ActiveOrderOperationConflictError,
@@ -28,11 +30,13 @@ _OPERATION_COLUMNS = """
     operation_type, request_reason_code, policy_reason_codes, display_reason,
     replacement_variant_id, request_excerpt, order_version, amount, currency,
     requires_manual_review, review_case_type, review_priority, support_case_id,
-    provider_reference, status, created_at, updated_at, version
+    provider_reference, status, created_at, updated_at, version,
+    customer_id, tenant_id, created_by
 """
 _EVENT_COLUMNS = """
     event_id, idempotency_key, operation_id, event_type, previous_status,
-    current_status, provider_reference, support_case_id, actor, created_at
+    current_status, provider_reference, support_case_id, actor,
+    customer_id, tenant_id, created_at
 """
 
 
@@ -72,6 +76,9 @@ def _operation_values(operation: OrderOperation) -> tuple[Any, ...]:
         operation.created_at,
         operation.updated_at,
         operation.version,
+        operation.customer_id,
+        operation.tenant_id,
+        operation.created_by,
     )
 
 
@@ -87,6 +94,8 @@ def _event_values(event: OrderOperationEvent) -> tuple[Any, ...]:
         event.provider_reference,
         event.support_case_id,
         event.actor,
+        event.customer_id,
+        event.tenant_id,
         event.created_at,
     )
 
@@ -105,6 +114,25 @@ def _raise_unique_violation(error: errors.UniqueViolation) -> NoReturn:
     ) from error
 
 
+def _validate_operation_ownership(
+    scope: AccessScope,
+    operation: OrderOperation,
+) -> None:
+    """Reject an operation whose ownership does not match the caller scope."""
+    if operation.tenant_id != scope.tenant_id:
+        raise ValueError("operation tenant_id must match the access scope")
+    if operation.customer_id != scope.customer_id:
+        raise ValueError("operation customer_id must match the access scope")
+
+
+def _validate_event_ownership(scope: AccessScope, event: OrderOperationEvent) -> None:
+    """Reject an event whose ownership does not match the caller scope."""
+    if event.tenant_id != scope.tenant_id:
+        raise ValueError("event tenant_id must match the access scope")
+    if event.customer_id != scope.customer_id:
+        raise ValueError("event customer_id must match the access scope")
+
+
 class PostgresOrderOperationRepository(OperationRepository):
     """Implement atomic order-operation persistence with an async pool."""
 
@@ -112,43 +140,55 @@ class PostgresOrderOperationRepository(OperationRepository):
         """Store a pool whose lifecycle is managed by the application."""
         self._pool = pool
 
-    async def get_operation(self, operation_id: UUID) -> OrderOperation | None:
-        """Return an operation by ID."""
+    async def get_operation(
+        self,
+        scope: AccessScope,
+        operation_id: UUID,
+    ) -> OrderOperation | None:
+        """Return an operation by ID within the caller's access scope."""
+        visibility, parameters = customer_owned_visibility(scope)
         query = f"""
             SELECT {_OPERATION_COLUMNS}
             FROM case_management.order_operations
-            WHERE operation_id = %s
+            WHERE operation_id = %s AND {visibility}
         """
-        return await self._fetch_operation(query, (operation_id,))
+        return await self._fetch_operation(query, (operation_id, *parameters))
 
     async def find_by_source_message(
         self,
+        scope: AccessScope,
         *,
         thread_id: str,
         source_message_id: str,
     ) -> OrderOperation | None:
         """Find an operation previously created by one source message."""
+        visibility, parameters = customer_owned_visibility(scope)
         query = f"""
             SELECT {_OPERATION_COLUMNS}
             FROM case_management.order_operations
-            WHERE thread_id = %s AND source_message_id = %s
+            WHERE thread_id = %s AND source_message_id = %s AND {visibility}
         """
-        return await self._fetch_operation(query, (thread_id, source_message_id))
+        return await self._fetch_operation(
+            query,
+            (thread_id, source_message_id, *parameters),
+        )
 
     async def find_event_by_idempotency_key(
         self,
+        scope: AccessScope,
         idempotency_key: str,
     ) -> OrderOperationEvent | None:
         """Find one immutable event by its stable idempotency key."""
+        visibility, parameters = customer_owned_visibility(scope)
         query = f"""
             SELECT {_EVENT_COLUMNS}
             FROM case_management.order_operation_events
-            WHERE idempotency_key = %s
+            WHERE idempotency_key = %s AND {visibility}
         """
         try:
             async with self._pool.connection() as connection:
                 async with connection.cursor(row_factory=dict_row) as cursor:
-                    await cursor.execute(query, (idempotency_key,))
+                    await cursor.execute(query, (idempotency_key, *parameters))
                     row = await cursor.fetchone()
         except PoolTimeout as error:
             raise OperationPersistenceError("Timed out acquiring PostgreSQL connection") from error
@@ -156,32 +196,42 @@ class PostgresOrderOperationRepository(OperationRepository):
             raise OperationPersistenceError("Could not read operation event") from error
         return _event_from_row(row) if row is not None else None
 
-    async def find_active_by_order_id(self, order_id: str) -> OrderOperation | None:
+    async def find_active_by_order_id(
+        self,
+        scope: AccessScope,
+        order_id: str,
+    ) -> OrderOperation | None:
         """Find an unresolved operation for one order."""
+        visibility, parameters = customer_owned_visibility(scope)
         query = f"""
             SELECT {_OPERATION_COLUMNS}
             FROM case_management.order_operations
             WHERE order_id = %s
               AND status IN ('pending_confirmation', 'submitted', 'processing', 'manual_review')
+              AND {visibility}
             ORDER BY created_at, operation_id
             LIMIT 1
         """
-        return await self._fetch_operation(query, (order_id,))
+        return await self._fetch_operation(query, (order_id, *parameters))
 
     async def create_operation_with_events(
         self,
+        scope: AccessScope,
         *,
         operation: OrderOperation,
         events: tuple[OrderOperationEvent, ...],
     ) -> None:
         """Create one operation and all supplied initial events atomically."""
+        _validate_operation_ownership(scope, operation)
+        for event in events:
+            _validate_event_ownership(scope, event)
         operation_sql = f"""
             INSERT INTO case_management.order_operations ({_OPERATION_COLUMNS})
-            VALUES ({', '.join(['%s'] * 23)})
+            VALUES ({', '.join(['%s'] * 26)})
         """
         event_sql = f"""
             INSERT INTO case_management.order_operation_events ({_EVENT_COLUMNS})
-            VALUES ({', '.join(['%s'] * 10)})
+            VALUES ({', '.join(['%s'] * 12)})
         """
         await self._write(
             operation_sql=operation_sql,
@@ -192,19 +242,24 @@ class PostgresOrderOperationRepository(OperationRepository):
 
     async def update_operation_with_events(
         self,
+        scope: AccessScope,
         *,
         operation: OrderOperation,
         events: tuple[OrderOperationEvent, ...],
         expected_version: int,
     ) -> None:
         """Optimistically update one operation and append events atomically."""
-        operation_sql = """
+        _validate_operation_ownership(scope, operation)
+        for event in events:
+            _validate_event_ownership(scope, event)
+        visibility, visibility_params = customer_owned_visibility(scope)
+        operation_sql = f"""
             UPDATE case_management.order_operations
             SET policy_reason_codes = %s, display_reason = %s,
                 review_case_type = %s, review_priority = %s,
                 support_case_id = %s, provider_reference = %s, status = %s,
                 updated_at = %s, version = %s
-            WHERE operation_id = %s AND version = %s
+            WHERE operation_id = %s AND version = %s AND {visibility}
         """
         values = (
             list(operation.policy_reason_codes),
@@ -218,10 +273,11 @@ class PostgresOrderOperationRepository(OperationRepository):
             operation.version,
             operation.operation_id,
             expected_version,
+            *visibility_params,
         )
         event_sql = f"""
             INSERT INTO case_management.order_operation_events ({_EVENT_COLUMNS})
-            VALUES ({', '.join(['%s'] * 10)})
+            VALUES ({', '.join(['%s'] * 12)})
         """
         await self._write(
             operation_sql=operation_sql,

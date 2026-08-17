@@ -1,8 +1,6 @@
 """Unit tests for the refund tools."""
 
 import datetime as dt
-import importlib
-import uuid
 from pathlib import Path
 
 import pytest
@@ -28,7 +26,13 @@ def test_search_order_is_independent_of_working_directory(
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
-    result = search_order.invoke({"order_id": "ORD-10001"})
+    result = search_order.invoke(
+        {
+            "order_id": "ORD-10001",
+            "customer_id": "customer-a",
+            "tenant_id": "tenant-demo",
+        }
+    )
 
     assert result["success"] is True
     assert result["order"]["order_id"] == "ORD-10001"
@@ -36,13 +40,48 @@ def test_search_order_is_independent_of_working_directory(
 
 
 def test_search_order_returns_not_found() -> None:
-    result = search_order.invoke({"order_id": "ORD-99999"})
+    result = search_order.invoke(
+        {
+            "order_id": "ORD-99999",
+            "customer_id": "customer-a",
+            "tenant_id": "tenant-demo",
+        }
+    )
 
     assert result == {
         "success": False,
         "error": "Order not found.",
         "order_id": "ORD-99999",
     }
+
+
+def test_search_order_denies_unauthorized_access() -> None:
+    result = search_order.invoke(
+        {
+            "order_id": "ORD-10001",
+            "customer_id": "customer-b",
+            "tenant_id": "tenant-demo",
+        }
+    )
+
+    assert result == {
+        "success": False,
+        "error": "Order not found.",
+        "order_id": "ORD-10001",
+    }
+
+
+def test_search_order_denies_other_tenant() -> None:
+    result = search_order.invoke(
+        {
+            "order_id": "ORD-10001",
+            "customer_id": "customer-a",
+            "tenant_id": "tenant-other",
+        }
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "Order not found."
 
 
 @pytest.mark.parametrize(
@@ -94,51 +133,3 @@ def test_policy_handles_invalid_data() -> None:
 
     assert result["eligible"] is False
     assert result["reason"] == "The order data is incomplete or invalid."
-
-
-def test_create_refund_request_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = importlib.import_module("agent.tools.create_refund_request")
-    monkeypatch.setattr(module, "_save_refund_request", lambda _data: True)
-
-    result = module.create_refund_request.invoke({"order_id": "ORD-10001"})
-
-    assert result["success"] is True
-    assert result["status"] == "pending"
-    uuid.UUID(result["refund_id"])
-    assert result["created_at"].tzinfo is not None
-
-
-def test_create_refund_request_is_idempotent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = importlib.import_module("agent.tools.create_refund_request")
-    existing_id = uuid.uuid4()
-    monkeypatch.setattr(module, "_save_refund_request", lambda _data: False)
-    monkeypatch.setattr(
-        module,
-        "_existing_request",
-        lambda _order_id: (existing_id, "pending"),
-    )
-
-    result = module.create_refund_request.invoke({"order_id": "ORD-10001"})
-
-    assert result["success"] is False
-    assert result["status"] == "already_exists"
-    assert result["refund_id"] == str(existing_id)
-
-
-def test_database_configuration_reports_missing_variable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = importlib.import_module("agent.tools.create_refund_request")
-    for name in (
-        "POSTGRES_URI",
-        "POSTGRES_USER",
-        "POSTGRES_PASSWORD",
-        "POSTGRES_HOST",
-        "POSTGRES_DB",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-    with pytest.raises(RuntimeError, match="POSTGRES_DB"):
-        module._database_uri()

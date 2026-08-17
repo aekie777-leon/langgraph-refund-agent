@@ -7,7 +7,7 @@ from agent.operations.models import (
     OrderOperationRequest,
     OrderSnapshot,
 )
-from agent.operations.provider import StaleOrderVersionError
+from agent.operations.provider import OrderNotAccessibleError, StaleOrderVersionError
 
 
 class InMemoryOrderProvider:
@@ -24,18 +24,33 @@ class InMemoryOrderProvider:
         self._operations_by_key: dict[str, ExistingOperation] = {}
         self._operation_count: defaultdict[str, int] = defaultdict(int)
 
-    async def get_order(self, order_id: str) -> OrderSnapshot | None:
-        """Return a snapshot by ID without exposing mutable internal state."""
+    async def get_order_for_customer(
+        self,
+        *,
+        order_id: str,
+        customer_id: str,
+        tenant_id: str,
+    ) -> OrderSnapshot | None:
+        """Return a snapshot only when it belongs to the caller."""
         order = self._orders.get(order_id)
-        return order.model_copy(deep=True) if order is not None else None
+        if order is None:
+            return None
+        if order.customer_id != customer_id or order.tenant_id != tenant_id:
+            return None
+        return order.model_copy(deep=True)
 
     async def get_replacement_availability(
         self,
         *,
         order_id: str,
+        customer_id: str,
+        tenant_id: str,
         replacement_variant_id: str,
     ) -> bool | None:
-        """Return the configured availability for an order and replacement variant."""
+        """Return the configured availability for an accessible order."""
+        order = self._orders.get(order_id)
+        if order is None or order.customer_id != customer_id or order.tenant_id != tenant_id:
+            raise OrderNotAccessibleError(f"Order not found: {order_id}")
         return self._replacement_availability.get((order_id, replacement_variant_id))
 
     async def submit_operation(
@@ -45,14 +60,14 @@ class InMemoryOrderProvider:
         expected_order_version: int,
         idempotency_key: str,
     ) -> ExistingOperation:
-        """Submit once by idempotency key and reject stale order versions."""
+        """Submit once by idempotency key and reject stale or inaccessible orders."""
         existing = self._operations_by_key.get(idempotency_key)
         if existing is not None:
             return existing
 
         order = self._orders.get(request.order_id)
-        if order is None:
-            raise LookupError(f"Order not found: {request.order_id}")
+        if order is None or order.customer_id != request.customer_id or order.tenant_id != request.tenant_id:
+            raise OrderNotAccessibleError(f"Order not found: {request.order_id}")
         if order.version != expected_order_version:
             raise StaleOrderVersionError(
                 f"Expected order version {expected_order_version}, got {order.version}"

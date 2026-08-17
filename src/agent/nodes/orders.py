@@ -4,7 +4,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 
+from agent.auth.context import require_scope
 from agent.order_context import ORDER_ID_PATTERN, references_previous_order
 from agent.prompts import ORDER_DETECTION_SYSTEM_PROMPT
 from agent.state import RefundState, latest_text_user_message
@@ -68,9 +70,28 @@ def build_order_detection_node(order_detector: Any) -> AsyncNode:
     return detect_order
 
 
-async def search_order_node(state: RefundState) -> dict[str, Any]:
-    """Look up the current order and retain it for explicit later reference."""
-    response = await search_order.ainvoke({"order_id": state["order_id"]})
+async def search_order_node(
+    state: RefundState,
+    config: RunnableConfig,
+) -> dict[str, Any]:
+    """Look up the current order within the caller's ownership scope."""
+    scope = require_scope(config)
+    if scope.customer_id is None:
+        return {
+            "search_success": False,
+            "messages": [
+                AIMessage(
+                    content="Order not found. Please enter the correct order number."
+                )
+            ],
+        }
+    response = await search_order.ainvoke(
+        {
+            "order_id": state["order_id"],
+            "customer_id": scope.customer_id,
+            "tenant_id": scope.tenant_id,
+        }
+    )
     if not response["success"]:
         return {
             "search_success": False,

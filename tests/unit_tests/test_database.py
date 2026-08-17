@@ -92,6 +92,8 @@ def test_project_migrations_include_current_schema_history() -> None:
         "0002_support_cases.sql",
         "0003_support_case_api_indexes.sql",
         "0004_order_operations.sql",
+        "0005_identity_and_ownership.sql",
+        "0006_case_assignment.sql",
     ]
 
 

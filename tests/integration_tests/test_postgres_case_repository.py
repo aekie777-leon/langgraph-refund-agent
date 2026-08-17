@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from psycopg_pool import AsyncConnectionPool
 
+from agent.auth.dependencies import require_access_scope
 from agent.cases.api import router as case_api_router
 from agent.cases.api_errors import register_case_exception_handlers
 from agent.cases.models import (
@@ -30,9 +31,12 @@ from agent.cases.runtime import get_case_service
 from agent.cases.service import CaseService
 from agent.database import create_async_connection_pool
 from agent.migrations import apply_migrations
+from tests.fakes.identity import make_scope
 
 pytestmark = [pytest.mark.anyio, pytest.mark.postgres]
 NOW = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+SCOPE = make_scope("customer")
+SUPERVISOR_SCOPE = make_scope("supervisor", user_id="sup-1")
 
 
 @pytest.fixture
@@ -105,19 +109,23 @@ async def test_create_round_trips_case_and_initial_event(
     service = CaseService(repository, clock=lambda: NOW)
 
     result = await service.record_handoff(
+        SCOPE,
         trigger=_trigger(thread_id, "message-1"),
         decision=_decision(),
     )
 
     assert result.case is not None
-    stored = await repository.get_case(result.case.case_id)
+    stored = await repository.get_case(SCOPE, result.case.case_id)
     event = await repository.find_event_by_idempotency_key(
-        f"message:{thread_id}:message-1"
+        SCOPE,
+        f"message:{thread_id}:message-1",
     )
     assert stored == result.case
     assert event == result.event
     assert stored.risk_categories == ("self_harm",)
     assert stored.reason_codes == ("semantic_medium_self_harm",)
+    assert stored.customer_id == "customer-a"
+    assert stored.tenant_id == "tenant-demo"
 
 
 @pytest.mark.anyio
@@ -129,8 +137,8 @@ async def test_duplicate_message_is_idempotent(
     service = CaseService(repository, clock=lambda: NOW)
     trigger = _trigger(thread_id, "message-1")
 
-    first = await service.record_handoff(trigger=trigger, decision=_decision())
-    duplicate = await service.record_handoff(trigger=trigger, decision=_decision())
+    first = await service.record_handoff(SCOPE, trigger=trigger, decision=_decision())
+    duplicate = await service.record_handoff(SCOPE, trigger=trigger, decision=_decision())
 
     assert duplicate.action == "duplicate_ignored"
     assert duplicate.case == first.case
@@ -145,10 +153,12 @@ async def test_same_thread_and_type_appends_persisted_event(
     service = CaseService(repository, clock=lambda: NOW)
 
     first = await service.record_handoff(
+        SCOPE,
         trigger=_trigger(thread_id, "message-1"),
         decision=_decision(),
     )
     second = await service.record_handoff(
+        SCOPE,
         trigger=_trigger(thread_id, "message-2"),
         decision=_decision(),
     )
@@ -158,7 +168,7 @@ async def test_same_thread_and_type_appends_persisted_event(
     assert second.action == "event_appended"
     assert second.case.case_id == first.case.case_id
     assert second.case.version == 2
-    stored = await repository.get_case(first.case.case_id)
+    stored = await repository.get_case(SCOPE, first.case.case_id)
     assert stored == second.case
 
 
@@ -170,6 +180,7 @@ async def test_partial_unique_index_rejects_second_active_case(
     repository = PostgresCaseRepository(pool)
     service = CaseService(repository, clock=lambda: NOW)
     first = await service.record_handoff(
+        SCOPE,
         trigger=_trigger(thread_id, "message-1"),
         decision=_decision(),
     )
@@ -195,6 +206,7 @@ async def test_partial_unique_index_rejects_second_active_case(
 
     with pytest.raises(ActiveCaseConflictError):
         await repository.create_case_with_event(
+            SCOPE,
             case=conflicting_case,
             event=conflicting_event,
         )
@@ -208,6 +220,7 @@ async def test_stale_version_raises_concurrent_update_error(
     repository = PostgresCaseRepository(pool)
     service = CaseService(repository, clock=lambda: NOW)
     created = await service.record_handoff(
+        SCOPE,
         trigger=_trigger(thread_id, "message-1"),
         decision=_decision(),
     )
@@ -240,11 +253,14 @@ async def test_stale_version_raises_concurrent_update_error(
         previous_status="open",
         current_status="in_progress",
         actor="integration-test",
+        customer_id=created.case.customer_id,
+        tenant_id=created.case.tenant_id,
         created_at=NOW,
     )
 
     with pytest.raises(ConcurrentCaseUpdateError):
         await repository.update_case_with_event(
+            SCOPE,
             case=stale_update,
             event=event,
             expected_version=1,
@@ -259,6 +275,7 @@ async def test_duplicate_event_rolls_back_case_update(
     repository = PostgresCaseRepository(pool)
     service = CaseService(repository, clock=lambda: NOW)
     created = await service.record_handoff(
+        SCOPE,
         trigger=_trigger(thread_id, "message-1"),
         decision=_decision(),
     )
@@ -282,17 +299,20 @@ async def test_duplicate_event_rolls_back_case_update(
         previous_status="open",
         current_status="in_progress",
         actor="integration-test",
+        customer_id=created.case.customer_id,
+        tenant_id=created.case.tenant_id,
         created_at=NOW,
     )
 
     with pytest.raises(DuplicateIdempotencyKeyError):
         await repository.update_case_with_event(
+            SCOPE,
             case=updated,
             event=duplicate_event,
             expected_version=1,
         )
 
-    stored = await repository.get_case(created.case.case_id)
+    stored = await repository.get_case(SCOPE, created.case.case_id)
     assert stored is not None
     assert stored.status == "open"
     assert stored.version == 1
@@ -306,6 +326,7 @@ async def test_internal_api_round_trips_case_status_and_events(
     repository = PostgresCaseRepository(pool)
     service = CaseService(repository, clock=lambda: NOW)
     created = await service.record_handoff(
+        SCOPE,
         trigger=_trigger(thread_id, "api-message-1"),
         decision=_decision(),
     )
@@ -315,6 +336,7 @@ async def test_internal_api_round_trips_case_status_and_events(
     app.include_router(case_api_router)
     register_case_exception_handlers(app)
     app.dependency_overrides[get_case_service] = lambda: service
+    app.dependency_overrides[require_access_scope] = lambda: SUPERVISOR_SCOPE
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -329,7 +351,6 @@ async def test_internal_api_round_trips_case_status_and_events(
             json={
                 "target_status": "in_progress",
                 "request_id": "postgres-api-status-1",
-                "actor": "integration-agent",
             },
         )
         duplicate = await client.post(
@@ -337,7 +358,6 @@ async def test_internal_api_round_trips_case_status_and_events(
             json={
                 "target_status": "in_progress",
                 "request_id": "postgres-api-status-1",
-                "actor": "integration-agent",
             },
         )
         events = await client.get(
@@ -351,4 +371,4 @@ async def test_internal_api_round_trips_case_status_and_events(
     assert duplicate.json()["action"] == "status_unchanged"
     assert events.status_code == 200
     assert events.json()["total"] == 2
-    assert any(item["actor"] == "integration-agent" for item in events.json()["items"])
+    assert any(item["actor"] == SUPERVISOR_SCOPE.identity for item in events.json()["items"])

@@ -1,7 +1,5 @@
 """Provide application-scoped dependencies for order-operation graph nodes."""
 
-from uuid import UUID
-
 from agent.operations.models import (
     ExistingOperation,
     OrderOperationRequest,
@@ -51,19 +49,33 @@ def clear_operation_dependencies() -> None:
 class RuntimeOrderProvider:
     """Resolve the configured provider lazily when a graph node executes."""
 
-    async def get_order(self, order_id: str) -> OrderSnapshot | None:
-        """Delegate the snapshot read after application startup."""
-        return await get_order_provider().get_order(order_id)
+    async def get_order_for_customer(
+        self,
+        *,
+        order_id: str,
+        customer_id: str,
+        tenant_id: str,
+    ) -> OrderSnapshot | None:
+        """Delegate the ownership-scoped snapshot read after startup."""
+        return await get_order_provider().get_order_for_customer(
+            order_id=order_id,
+            customer_id=customer_id,
+            tenant_id=tenant_id,
+        )
 
     async def get_replacement_availability(
         self,
         *,
         order_id: str,
+        customer_id: str,
+        tenant_id: str,
         replacement_variant_id: str,
     ) -> bool | None:
         """Delegate replacement availability after application startup."""
         return await get_order_provider().get_replacement_availability(
             order_id=order_id,
+            customer_id=customer_id,
+            tenant_id=tenant_id,
             replacement_variant_id=replacement_variant_id,
         )
 
@@ -85,38 +97,26 @@ class RuntimeOrderProvider:
 class RuntimeOperationService:
     """Resolve the configured operation service lazily when a node executes."""
 
-    async def create_pending_operation(self, **kwargs):
+    async def create_pending_operation(self, scope, **kwargs):
         """Delegate pending-operation creation after application startup."""
-        return await get_operation_service().create_pending_operation(**kwargs)
+        return await get_operation_service().create_pending_operation(scope, **kwargs)
 
-    async def submit_confirmed_operation(self, **kwargs):
+    async def submit_confirmed_operation(self, scope, **kwargs):
         """Delegate automatic submission after application startup."""
-        return await get_operation_service().submit_confirmed_operation(**kwargs)
+        return await get_operation_service().submit_confirmed_operation(scope, **kwargs)
 
-    async def confirm_operation(self, **kwargs):
+    async def confirm_operation(self, scope, **kwargs):
         """Delegate manual confirmation after application startup."""
-        return await get_operation_service().confirm_operation(**kwargs)
+        return await get_operation_service().confirm_operation(scope, **kwargs)
 
-    async def cancel_pending_operation(self, **kwargs):
+    async def cancel_pending_operation(self, scope, **kwargs):
         """Delegate pending cancellation after application startup."""
-        return await get_operation_service().cancel_pending_operation(**kwargs)
+        return await get_operation_service().cancel_pending_operation(scope, **kwargs)
 
-    async def update_operation_status(self, **kwargs):
+    async def update_operation_status(self, scope, **kwargs):
         """Delegate status updates after application startup."""
-        return await get_operation_service().update_operation_status(**kwargs)
+        return await get_operation_service().update_operation_status(scope, **kwargs)
 
-    async def attach_support_case(
-        self,
-        *,
-        operation_id: UUID,
-        support_case_id: UUID,
-        request_id: str,
-        actor: str,
-    ):
+    async def attach_support_case(self, scope, **kwargs):
         """Delegate case attachment after application startup."""
-        return await get_operation_service().attach_support_case(
-            operation_id=operation_id,
-            support_case_id=support_case_id,
-            request_id=request_id,
-            actor=actor,
-        )
+        return await get_operation_service().attach_support_case(scope, **kwargs)

@@ -21,6 +21,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.pytest-tmp*/
+.tmp-test/
 .release-pytest-tmp/
 .ruff_cache/
 .mypy_cache/

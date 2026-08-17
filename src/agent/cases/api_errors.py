@@ -3,6 +3,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from agent.auth.visibility import ForbiddenError
 from agent.cases.api_models import ApiErrorDetail, ApiErrorResponse
 from agent.cases.policy import InvalidCaseStatusTransition
 from agent.cases.repository import (
@@ -23,6 +24,18 @@ def _error_response(
     return JSONResponse(
         status_code=status_code,
         content=payload.model_dump(mode="json"),
+    )
+
+
+async def _forbidden_handler(
+    _request: Request,
+    error: Exception,
+) -> JSONResponse:
+    assert isinstance(error, ForbiddenError)
+    return _error_response(
+        status_code=403,
+        code="forbidden",
+        message="The authenticated caller is not allowed to perform this action.",
     )
 
 
@@ -76,6 +89,7 @@ async def _persistence_failure_handler(
 
 def register_case_exception_handlers(app: FastAPI) -> None:
     """Register domain-specific handlers on the custom FastAPI app."""
+    app.add_exception_handler(ForbiddenError, _forbidden_handler)
     app.add_exception_handler(CaseNotFoundError, _case_not_found_handler)
     app.add_exception_handler(
         InvalidCaseStatusTransition,

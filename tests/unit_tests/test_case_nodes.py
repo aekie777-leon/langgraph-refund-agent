@@ -13,13 +13,14 @@ from agent.nodes.cases import (
     build_handoff_policy_input,
     extract_hard_critical_categories,
 )
+from tests.fakes.identity import config_with_identity
 from tests.support_cases import InMemoryCaseRepository
 
 pytestmark = pytest.mark.anyio
 
 
 def _config(thread_id: str = "thread-1"):
-    return {"configurable": {"thread_id": thread_id}}
+    return config_with_identity("customer", thread_id=thread_id)
 
 
 def _hard_risk_state():
@@ -147,7 +148,7 @@ async def test_positive_decision_persists_and_returns_case_summary() -> None:
 
 async def test_persistence_failure_is_not_hidden() -> None:
     class FailingService:
-        async def record_handoff(self, *, trigger, decision):
+        async def record_handoff(self, scope, *, trigger, decision):
             raise CasePersistenceError("database unavailable")
 
     node = build_finalize_case_handoff_node(lambda: cast(CaseService, FailingService()))

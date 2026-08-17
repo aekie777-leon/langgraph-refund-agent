@@ -5,7 +5,9 @@
     "status": "delivered",
     "delivery_days_ago": 2,
     "amount": 69.99,
-    "refunded": false
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
   },
   "ORD-10002": {
     "order_id": "ORD-10002",
@@ -13,7 +15,9 @@
     "status": "delivered",
     "delivery_days_ago": 1,
     "amount": 149.99,
-    "refunded": false
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
   },
   "ORD-10003": {
     "order_id": "ORD-10003",
@@ -21,7 +25,9 @@
     "status": "delivered",
     "delivery_days_ago": 10,
     "amount": 59.99,
-    "refunded": false
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
   },
   "ORD-10004": {
     "order_id": "ORD-10004",
@@ -29,7 +35,9 @@
     "status": "shipped",
     "delivery_days_ago": 1,
     "amount": 49.99,
-    "refunded": false
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
   },
   "ORD-10005": {
     "order_id": "ORD-10005",
@@ -37,7 +45,9 @@
     "status": "delivered",
     "delivery_days_ago": 2,
     "amount": 79.99,
-    "refunded": true
+    "refunded": true,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
   },
   "ORD-10006": {
     "order_id": "ORD-10006",
@@ -45,7 +55,9 @@
     "status": "delivered",
     "delivery_days_ago": -2,
     "amount": 89.99,
-    "refunded": false
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
   },
   "ORD-10007": {
     "order_id": "ORD-10007",
@@ -53,28 +65,36 @@
     "status": "delivered",
     "delivery_days_ago": 7,
     "amount": 89.99,
-    "refunded": false
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
   },
   "ORD-10008": {
     "order_id": "ORD-10008",
     "product_name": "Portable Charger",
     "status": "confirmed",
     "amount": 49.99,
-    "refunded": false
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
   },
   "ORD-10009": {
     "order_id": "ORD-10009",
     "product_name": "Ergonomic Chair Cushion",
     "status": "processing",
     "amount": 79.99,
-    "refunded": false
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
   },
   "ORD-10010": {
     "order_id": "ORD-10010",
     "product_name": "Wireless Headphones",
     "status": "shipped",
     "amount": 89.99,
-    "refunded": false
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
   },
   "ORD-10011": {
     "order_id": "ORD-10011",
@@ -82,6 +102,28 @@
     "status": "delivered",
     "delivery_days_ago": 1,
     "amount": 59.99,
-    "refunded": false
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
+  },
+  "ORD-20001": {
+    "order_id": "ORD-20001",
+    "product_name": "Desk Mat",
+    "status": "delivered",
+    "delivery_days_ago": 2,
+    "amount": 69.99,
+    "refunded": false,
+    "owner_customer_id": "customer-b",
+    "tenant_id": "tenant-demo"
+  },
+  "ORD-30001": {
+    "order_id": "ORD-30001",
+    "product_name": "Phone Stand",
+    "status": "delivered",
+    "delivery_days_ago": 2,
+    "amount": 59.99,
+    "refunded": false,
+    "owner_customer_id": "customer-c",
+    "tenant_id": "tenant-other"
   }
 }

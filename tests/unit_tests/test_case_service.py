@@ -5,31 +5,24 @@ from uuid import UUID
 
 import pytest
 
+from agent.auth.visibility import ForbiddenError
 from agent.cases.models import (
-    CaseListQuery,
     CaseTrigger,
     HandoffDecision,
     HandoffPolicyInput,
-    SupportCase,
-    SupportCaseEvent,
-    SupportCaseEventPage,
-    SupportCasePage,
 )
 from agent.cases.policy import (
     InvalidCaseStatusTransition,
     determine_handoff_policy,
 )
-from agent.cases.repository import (
-    ActiveCaseConflictError,
-    CaseNotFoundError,
-    ConcurrentCaseUpdateError,
-    DuplicateIdempotencyKeyError,
-    DuplicateSourceMessageError,
-)
+from agent.cases.repository import CaseNotFoundError
 from agent.cases.service import CaseService
+from tests.fakes.identity import make_scope
+from tests.support_cases import InMemoryCaseRepository
 
 NOW = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
-UNRESOLVED_STATUSES = {"open", "in_progress", "on_hold"}
+SCOPE = make_scope("customer")
+SUPERVISOR_SCOPE = make_scope("supervisor", user_id="sup-1")
 
 
 @pytest.fixture
@@ -37,137 +30,13 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-class _InMemoryCaseRepository:
-    """Enforce the repository contract without external infrastructure."""
-
-    def __init__(self) -> None:
-        self.cases: dict[UUID, SupportCase] = {}
-        self.events: list[SupportCaseEvent] = []
-
-    async def get_case(self, case_id: UUID) -> SupportCase | None:
-        return self.cases.get(case_id)
-
-    async def find_by_source_message(
-        self,
-        *,
-        thread_id: str,
-        source_message_id: str,
-    ) -> SupportCase | None:
-        for event in self.events:
-            if event.source_message_id != source_message_id:
-                continue
-            case = self.cases[event.case_id]
-            if case.thread_id == thread_id:
-                return case
-        return None
-
-    async def find_event_by_idempotency_key(
-        self,
-        idempotency_key: str,
-    ) -> SupportCaseEvent | None:
-        return next(
-            (
-                event
-                for event in self.events
-                if event.idempotency_key == idempotency_key
-            ),
-            None,
-        )
-
-    async def find_unresolved_case(
-        self,
-        *,
-        thread_id: str,
-        case_type,
-    ) -> SupportCase | None:
-        return next(
-            (
-                case
-                for case in self.cases.values()
-                if case.thread_id == thread_id
-                and case.case_type == case_type
-                and case.status in UNRESOLVED_STATUSES
-            ),
-            None,
-        )
-
-    async def list_cases(self, query: CaseListQuery) -> SupportCasePage:
-        items = tuple(self.cases.values())
-        return SupportCasePage(
-            items=items[query.offset : query.offset + query.limit],
-            total=len(items),
-            limit=query.limit,
-            offset=query.offset,
-        )
-
-    async def list_case_events(
-        self,
-        *,
-        case_id: UUID,
-        limit: int,
-        offset: int,
-    ) -> SupportCaseEventPage:
-        items = tuple(event for event in self.events if event.case_id == case_id)
-        return SupportCaseEventPage(
-            items=items[offset : offset + limit],
-            total=len(items),
-            limit=limit,
-            offset=offset,
-        )
-
-    async def create_case_with_event(
-        self,
-        *,
-        case: SupportCase,
-        event: SupportCaseEvent,
-    ) -> None:
-        if await self.find_event_by_idempotency_key(event.idempotency_key):
-            raise DuplicateIdempotencyKeyError(event.idempotency_key)
-        if event.source_message_id is not None and await self.find_by_source_message(
-            thread_id=case.thread_id,
-            source_message_id=event.source_message_id,
-        ):
-            raise DuplicateSourceMessageError(event.source_message_id)
-        if await self.find_unresolved_case(
-            thread_id=case.thread_id,
-            case_type=case.case_type,
-        ):
-            raise ActiveCaseConflictError(case.thread_id)
-
-        self.cases[case.case_id] = case
-        self.events.append(event)
-
-    async def update_case_with_event(
-        self,
-        *,
-        case: SupportCase,
-        event: SupportCaseEvent,
-        expected_version: int,
-    ) -> None:
-        current = self.cases.get(case.case_id)
-        if current is None:
-            raise CaseNotFoundError(str(case.case_id))
-        if current.version != expected_version:
-            raise ConcurrentCaseUpdateError(str(case.case_id))
-        if await self.find_event_by_idempotency_key(event.idempotency_key):
-            raise DuplicateIdempotencyKeyError(event.idempotency_key)
-        if event.source_message_id is not None and await self.find_by_source_message(
-            thread_id=current.thread_id,
-            source_message_id=event.source_message_id,
-        ):
-            raise DuplicateSourceMessageError(event.source_message_id)
-
-        self.cases[case.case_id] = case
-        self.events.append(event)
+@pytest.fixture
+def repository() -> InMemoryCaseRepository:
+    return InMemoryCaseRepository()
 
 
 @pytest.fixture
-def repository() -> _InMemoryCaseRepository:
-    return _InMemoryCaseRepository()
-
-
-@pytest.fixture
-def service(repository: _InMemoryCaseRepository) -> CaseService:
+def service(repository: InMemoryCaseRepository) -> CaseService:
     return CaseService(repository, clock=lambda: NOW)
 
 
@@ -211,9 +80,10 @@ def _high_safety_decision() -> HandoffDecision:
 @pytest.mark.anyio
 async def test_negative_decision_does_not_write_repository(
     service: CaseService,
-    repository: _InMemoryCaseRepository,
+    repository: InMemoryCaseRepository,
 ) -> None:
     result = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=HandoffDecision(should_create_case=False),
     )
@@ -228,9 +98,10 @@ async def test_negative_decision_does_not_write_repository(
 @pytest.mark.anyio
 async def test_first_trigger_creates_case_and_initial_event(
     service: CaseService,
-    repository: _InMemoryCaseRepository,
+    repository: InMemoryCaseRepository,
 ) -> None:
     result = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=_medium_safety_decision(),
     )
@@ -242,8 +113,12 @@ async def test_first_trigger_creates_case_and_initial_event(
     assert result.case.priority == "p2"
     assert result.case.status == "open"
     assert result.case.version == 1
+    assert result.case.customer_id == "customer-a"
+    assert result.case.tenant_id == "tenant-demo"
+    assert result.case.created_by == "tenant-demo:customer-a"
     assert result.event.event_type == "case_created"
     assert result.event.source_message_id == "message-1"
+    assert result.event.actor == "system"
     assert len(repository.cases) == 1
     assert len(repository.events) == 1
 
@@ -251,13 +126,13 @@ async def test_first_trigger_creates_case_and_initial_event(
 @pytest.mark.anyio
 async def test_duplicate_source_message_is_ignored(
     service: CaseService,
-    repository: _InMemoryCaseRepository,
+    repository: InMemoryCaseRepository,
 ) -> None:
     trigger = _trigger("message-1")
     decision = _medium_safety_decision()
 
-    first = await service.record_handoff(trigger=trigger, decision=decision)
-    duplicate = await service.record_handoff(trigger=trigger, decision=decision)
+    first = await service.record_handoff(SCOPE, trigger=trigger, decision=decision)
+    duplicate = await service.record_handoff(SCOPE, trigger=trigger, decision=decision)
 
     assert duplicate.action == "duplicate_ignored"
     assert duplicate.case == first.case
@@ -269,13 +144,15 @@ async def test_duplicate_source_message_is_ignored(
 @pytest.mark.anyio
 async def test_same_thread_and_type_appends_event_and_merges_summary(
     service: CaseService,
-    repository: _InMemoryCaseRepository,
+    repository: InMemoryCaseRepository,
 ) -> None:
     first = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=_medium_safety_decision(),
     )
     second = await service.record_handoff(
+        SCOPE,
         trigger=_trigger(
             "message-2",
             risk_level="high",
@@ -306,6 +183,7 @@ async def test_later_trigger_cannot_downgrade_priority(
     service: CaseService,
 ) -> None:
     await service.record_handoff(
+        SCOPE,
         trigger=_trigger(
             "message-1",
             risk_level="high",
@@ -314,6 +192,7 @@ async def test_later_trigger_cannot_downgrade_priority(
         decision=_high_safety_decision(),
     )
     result = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-2"),
         decision=_medium_safety_decision(),
     )
@@ -326,9 +205,10 @@ async def test_later_trigger_cannot_downgrade_priority(
 @pytest.mark.anyio
 async def test_same_thread_with_different_type_creates_another_case(
     service: CaseService,
-    repository: _InMemoryCaseRepository,
+    repository: InMemoryCaseRepository,
 ) -> None:
     await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=_medium_safety_decision(),
     )
@@ -336,6 +216,7 @@ async def test_same_thread_with_different_type_creates_another_case(
         HandoffPolicyInput(refund_requires_manual_review=True)
     )
     result = await service.record_handoff(
+        SCOPE,
         trigger=_trigger(
             "message-2",
             risk_level=None,
@@ -354,27 +235,29 @@ async def test_same_thread_with_different_type_creates_another_case(
 @pytest.mark.anyio
 async def test_resolved_case_does_not_receive_a_new_trigger(
     service: CaseService,
-    repository: _InMemoryCaseRepository,
+    repository: InMemoryCaseRepository,
 ) -> None:
     first = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=_medium_safety_decision(),
     )
     assert first.case is not None
     await service.change_status(
+        SUPERVISOR_SCOPE,
         case_id=first.case.case_id,
         target_status="in_progress",
         request_id="status-1",
-        actor="agent-1",
     )
     await service.change_status(
+        SUPERVISOR_SCOPE,
         case_id=first.case.case_id,
         target_status="resolved",
         request_id="status-2",
-        actor="agent-1",
     )
 
     result = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-2"),
         decision=_medium_safety_decision(),
     )
@@ -388,19 +271,20 @@ async def test_resolved_case_does_not_receive_a_new_trigger(
 @pytest.mark.anyio
 async def test_valid_status_change_updates_version_and_creates_event(
     service: CaseService,
-    repository: _InMemoryCaseRepository,
+    repository: InMemoryCaseRepository,
 ) -> None:
     created = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=_medium_safety_decision(),
     )
     assert created.case is not None
 
     result = await service.change_status(
+        SUPERVISOR_SCOPE,
         case_id=created.case.case_id,
         target_status="in_progress",
         request_id="status-1",
-        actor="agent-1",
     )
 
     assert result.action == "status_changed"
@@ -410,30 +294,31 @@ async def test_valid_status_change_updates_version_and_creates_event(
     assert result.case.version == 2
     assert result.event.previous_status == "open"
     assert result.event.current_status == "in_progress"
-    assert result.event.actor == "agent-1"
+    assert result.event.actor == "tenant-demo:sup-1"
     assert len(repository.events) == 2
 
 
 @pytest.mark.anyio
 async def test_putting_case_on_hold_requires_reason(service: CaseService) -> None:
     created = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=_medium_safety_decision(),
     )
     assert created.case is not None
     await service.change_status(
+        SUPERVISOR_SCOPE,
         case_id=created.case.case_id,
         target_status="in_progress",
         request_id="status-1",
-        actor="agent-1",
     )
 
     with pytest.raises(ValueError, match="on_hold_reason is required"):
         await service.change_status(
+            SUPERVISOR_SCOPE,
             case_id=created.case.case_id,
             target_status="on_hold",
             request_id="status-2",
-            actor="agent-1",
         )
 
 
@@ -442,31 +327,32 @@ async def test_on_hold_reason_is_saved_and_cleared_after_resume(
     service: CaseService,
 ) -> None:
     created = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=_medium_safety_decision(),
     )
     assert created.case is not None
     await service.change_status(
+        SUPERVISOR_SCOPE,
         case_id=created.case.case_id,
         target_status="in_progress",
         request_id="status-1",
-        actor="agent-1",
     )
     held = await service.change_status(
+        SUPERVISOR_SCOPE,
         case_id=created.case.case_id,
         target_status="on_hold",
         request_id="status-2",
-        actor="agent-1",
         on_hold_reason="waiting_customer",
     )
     assert held.case is not None
     assert held.case.on_hold_reason == "waiting_customer"
 
     resumed = await service.change_status(
+        SUPERVISOR_SCOPE,
         case_id=created.case.case_id,
         target_status="in_progress",
         request_id="status-3",
-        actor="agent-1",
     )
 
     assert resumed.case is not None
@@ -476,9 +362,10 @@ async def test_on_hold_reason_is_saved_and_cleared_after_resume(
 @pytest.mark.anyio
 async def test_repeating_current_status_is_an_idempotent_noop(
     service: CaseService,
-    repository: _InMemoryCaseRepository,
+    repository: InMemoryCaseRepository,
 ) -> None:
     created = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=_medium_safety_decision(),
     )
@@ -486,10 +373,10 @@ async def test_repeating_current_status_is_an_idempotent_noop(
     event_count = len(repository.events)
 
     result = await service.change_status(
+        SUPERVISOR_SCOPE,
         case_id=created.case.case_id,
         target_status="open",
         request_id="status-1",
-        actor="agent-1",
     )
 
     assert result.action == "status_unchanged"
@@ -500,24 +387,25 @@ async def test_repeating_current_status_is_an_idempotent_noop(
 @pytest.mark.anyio
 async def test_repeating_status_request_does_not_create_a_second_event(
     service: CaseService,
-    repository: _InMemoryCaseRepository,
+    repository: InMemoryCaseRepository,
 ) -> None:
     created = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=_medium_safety_decision(),
     )
     assert created.case is not None
     first = await service.change_status(
+        SUPERVISOR_SCOPE,
         case_id=created.case.case_id,
         target_status="in_progress",
         request_id="status-1",
-        actor="agent-1",
     )
     duplicate = await service.change_status(
+        SUPERVISOR_SCOPE,
         case_id=created.case.case_id,
         target_status="in_progress",
         request_id="status-1",
-        actor="agent-1",
     )
 
     assert first.action == "status_changed"
@@ -528,6 +416,7 @@ async def test_repeating_status_request_does_not_create_a_second_event(
 @pytest.mark.anyio
 async def test_invalid_status_transition_is_rejected(service: CaseService) -> None:
     created = await service.record_handoff(
+        SCOPE,
         trigger=_trigger("message-1"),
         decision=_medium_safety_decision(),
     )
@@ -535,10 +424,10 @@ async def test_invalid_status_transition_is_rejected(service: CaseService) -> No
 
     with pytest.raises(InvalidCaseStatusTransition):
         await service.change_status(
+            SUPERVISOR_SCOPE,
             case_id=created.case.case_id,
             target_status="resolved",
             request_id="status-1",
-            actor="agent-1",
         )
 
 
@@ -546,8 +435,157 @@ async def test_invalid_status_transition_is_rejected(service: CaseService) -> No
 async def test_unknown_case_is_rejected(service: CaseService) -> None:
     with pytest.raises(CaseNotFoundError):
         await service.change_status(
+            SUPERVISOR_SCOPE,
             case_id=UUID("00000000-0000-0000-0000-000000000001"),
             target_status="in_progress",
             request_id="status-1",
-            actor="agent-1",
+        )
+
+
+@pytest.mark.anyio
+async def test_customer_cannot_change_status(
+    service: CaseService,
+    repository: InMemoryCaseRepository,
+) -> None:
+    created = await service.record_handoff(
+        SCOPE,
+        trigger=_trigger("message-1"),
+        decision=_medium_safety_decision(),
+    )
+    assert created.case is not None
+
+    with pytest.raises(ForbiddenError):
+        await service.change_status(
+            SCOPE,
+            case_id=created.case.case_id,
+            target_status="in_progress",
+            request_id="status-1",
+        )
+    assert len(repository.events) == 1
+
+
+@pytest.mark.anyio
+async def test_only_supervisor_can_assign(
+    service: CaseService,
+) -> None:
+    created = await service.record_handoff(
+        SCOPE,
+        trigger=_trigger("message-1"),
+        decision=_medium_safety_decision(),
+    )
+    assert created.case is not None
+
+    with pytest.raises(ForbiddenError):
+        await service.assign_case(
+            SCOPE,
+            case_id=created.case.case_id,
+            agent_id="agent-7",
+            request_id="assign-1",
+        )
+    with pytest.raises(ForbiddenError):
+        await service.assign_case(
+            make_scope("support_agent", user_id="agent-7"),
+            case_id=created.case.case_id,
+            agent_id="agent-8",
+            request_id="assign-1",
+        )
+
+
+@pytest.mark.anyio
+async def test_supervisor_assigns_case_idempotently(
+    service: CaseService,
+    repository: InMemoryCaseRepository,
+) -> None:
+    created = await service.record_handoff(
+        SCOPE,
+        trigger=_trigger("message-1"),
+        decision=_medium_safety_decision(),
+    )
+    assert created.case is not None
+
+    first = await service.assign_case(
+        SUPERVISOR_SCOPE,
+        case_id=created.case.case_id,
+        agent_id="agent-7",
+        request_id="assign-1",
+    )
+    duplicate = await service.assign_case(
+        SUPERVISOR_SCOPE,
+        case_id=created.case.case_id,
+        agent_id="agent-7",
+        request_id="assign-1",
+    )
+    same_agent = await service.assign_case(
+        SUPERVISOR_SCOPE,
+        case_id=created.case.case_id,
+        agent_id="agent-7",
+        request_id="assign-2",
+    )
+
+    assert first.action == "assigned"
+    assert first.case is not None
+    assert first.event is not None
+    assert first.case.assigned_agent_id == "agent-7"
+    assert first.event.event_type == "assigned"
+    assert first.event.current_assigned_agent_id == "agent-7"
+    assert first.event.previous_assigned_agent_id is None
+    assert first.event.actor == "tenant-demo:sup-1"
+    assert duplicate.action == "status_unchanged"
+    assert same_agent.action == "status_unchanged"
+    assert len(repository.events) == 2
+
+
+@pytest.mark.anyio
+async def test_supervisor_reassigns_case_with_previous_agent(
+    service: CaseService,
+    repository: InMemoryCaseRepository,
+) -> None:
+    created = await service.record_handoff(
+        SCOPE,
+        trigger=_trigger("message-1"),
+        decision=_medium_safety_decision(),
+    )
+    assert created.case is not None
+
+    await service.assign_case(
+        SUPERVISOR_SCOPE,
+        case_id=created.case.case_id,
+        agent_id="agent-7",
+        request_id="assign-1",
+    )
+    result = await service.assign_case(
+        SUPERVISOR_SCOPE,
+        case_id=created.case.case_id,
+        agent_id="agent-8",
+        request_id="assign-2",
+    )
+
+    assert result.action == "assigned"
+    assert result.case is not None
+    assert result.event is not None
+    assert result.case.assigned_agent_id == "agent-8"
+    assert result.event.previous_assigned_agent_id == "agent-7"
+    assert result.event.current_assigned_agent_id == "agent-8"
+    assert len(repository.events) == 3
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("agent_id", ["", "system", "legacy", "a:b", "x" * 129])
+async def test_assign_rejects_invalid_agent_ids(
+    service: CaseService,
+    agent_id: str,
+) -> None:
+    created = await service.record_handoff(
+        SCOPE,
+        trigger=_trigger("message-1"),
+        decision=_medium_safety_decision(),
+    )
+    assert created.case is not None
+
+    with pytest.raises(ValueError):
+        await service.assign_case(
+            SUPERVISOR_SCOPE,
+            case_id=created.case.case_id,
+            agent_id=agent_id,
+            request_id=f"assign-{len(agent_id)}",
         )

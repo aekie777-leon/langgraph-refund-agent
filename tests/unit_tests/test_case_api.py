@@ -7,6 +7,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from agent.auth.dependencies import require_access_scope
+from agent.auth.models import AccessScope
 from agent.cases.api import router
 from agent.cases.api_errors import register_case_exception_handlers
 from agent.cases.models import CaseTrigger, HandoffPolicyInput
@@ -14,10 +16,14 @@ from agent.cases.policy import determine_handoff_policy
 from agent.cases.repository import CasePersistenceError
 from agent.cases.runtime import get_case_service
 from agent.cases.service import CaseService
+from tests.fakes.identity import make_scope
 from tests.support_cases import InMemoryCaseRepository
 
 pytestmark = pytest.mark.anyio
 NOW = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+SCOPE = make_scope("customer")
+SUPERVISOR_SCOPE = make_scope("supervisor", user_id="sup-1")
+AGENT_SCOPE = make_scope("support_agent", user_id="agent-7")
 
 
 @pytest.fixture
@@ -25,16 +31,18 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def _app_with_service(service: object) -> FastAPI:
+def _app_with_service(service: object, *, scope: AccessScope = SCOPE) -> FastAPI:
     app = FastAPI()
     app.include_router(router)
     register_case_exception_handlers(app)
     app.dependency_overrides[get_case_service] = lambda: service
+    app.dependency_overrides[require_access_scope] = lambda: scope
     return app
 
 
 async def _create_case(service: CaseService):
     return await service.record_handoff(
+        SCOPE,
         trigger=CaseTrigger(
             thread_id="api-thread-1",
             source_message_id="api-message-1",
@@ -60,6 +68,7 @@ async def test_openapi_contains_all_internal_case_routes() -> None:
     assert "/internal/support-cases/{case_id}" in paths
     assert "/internal/support-cases/{case_id}/events" in paths
     assert "/internal/support-cases/{case_id}/status" in paths
+    assert "/internal/support-cases/{case_id}/assign" in paths
 
 
 async def test_cases_can_be_filtered_and_read_with_events() -> None:
@@ -103,12 +112,11 @@ async def test_status_update_is_idempotent_and_audited() -> None:
     service = CaseService(repository, clock=lambda: NOW)
     created = await _create_case(service)
     assert created.case is not None
-    app = _app_with_service(service)
+    app = _app_with_service(service, scope=SUPERVISOR_SCOPE)
     path = f"/internal/support-cases/{created.case.case_id}/status"
     payload = {
         "target_status": "in_progress",
         "request_id": "api-status-1",
-        "actor": "agent-7",
     }
 
     async with httpx.AsyncClient(
@@ -127,7 +135,7 @@ async def test_status_update_is_idempotent_and_audited() -> None:
     assert duplicate.status_code == 200
     assert duplicate.json()["action"] == "status_unchanged"
     assert events.json()["total"] == 2
-    assert any(item["actor"] == "agent-7" for item in events.json()["items"])
+    assert any(item["actor"] == SUPERVISOR_SCOPE.identity for item in events.json()["items"])
 
 
 async def test_on_hold_requires_a_reason_at_the_api_boundary() -> None:
@@ -143,7 +151,6 @@ async def test_on_hold_requires_a_reason_at_the_api_boundary() -> None:
             json={
                 "target_status": "on_hold",
                 "request_id": "api-status-2",
-                "actor": "agent-7",
             },
         )
 
@@ -155,7 +162,7 @@ async def test_invalid_transition_returns_a_conflict() -> None:
     service = CaseService(repository, clock=lambda: NOW)
     created = await _create_case(service)
     assert created.case is not None
-    app = _app_with_service(service)
+    app = _app_with_service(service, scope=SUPERVISOR_SCOPE)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -166,7 +173,6 @@ async def test_invalid_transition_returns_a_conflict() -> None:
             json={
                 "target_status": "resolved",
                 "request_id": "api-status-3",
-                "actor": "agent-7",
             },
         )
 
@@ -214,7 +220,7 @@ async def test_empty_text_filters_are_rejected_at_the_api_boundary(
 
 async def test_storage_failure_returns_safe_service_unavailable_error() -> None:
     class UnavailableCaseService:
-        async def list_cases(self, _query):
+        async def list_cases(self, _scope, _query):
             raise CasePersistenceError("database password appeared here")
 
     app = _app_with_service(UnavailableCaseService())
@@ -233,3 +239,165 @@ async def test_storage_failure_returns_safe_service_unavailable_error() -> None:
         }
     }
     assert "password" not in response.text
+
+
+async def test_customer_cannot_change_status() -> None:
+    repository = InMemoryCaseRepository()
+    service = CaseService(repository, clock=lambda: NOW)
+    created = await _create_case(service)
+    assert created.case is not None
+    app = _app_with_service(service)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/internal/support-cases/{created.case.case_id}/status",
+            json={"target_status": "in_progress", "request_id": "api-status-1"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
+
+
+async def test_customer_cannot_assign() -> None:
+    repository = InMemoryCaseRepository()
+    service = CaseService(repository, clock=lambda: NOW)
+    created = await _create_case(service)
+    assert created.case is not None
+    app = _app_with_service(service)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/internal/support-cases/{created.case.case_id}/assign",
+            json={"agent_id": "agent-7", "request_id": "api-assign-1"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
+
+
+async def test_support_agent_cannot_assign() -> None:
+    repository = InMemoryCaseRepository()
+    service = CaseService(repository, clock=lambda: NOW)
+    created = await _create_case(service)
+    assert created.case is not None
+    app = _app_with_service(service, scope=AGENT_SCOPE)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/internal/support-cases/{created.case.case_id}/assign",
+            json={"agent_id": "agent-8", "request_id": "api-assign-1"},
+        )
+
+    assert response.status_code == 403
+
+
+async def test_support_agent_cannot_see_unassigned_case() -> None:
+    repository = InMemoryCaseRepository()
+    service = CaseService(repository, clock=lambda: NOW)
+    created = await _create_case(service)
+    assert created.case is not None
+    app = _app_with_service(service, scope=AGENT_SCOPE)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            f"/internal/support-cases/{created.case.case_id}"
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "case_not_found"
+
+
+async def test_supervisor_assigns_and_agent_can_work_the_case() -> None:
+    repository = InMemoryCaseRepository()
+    service = CaseService(repository, clock=lambda: NOW)
+    created = await _create_case(service)
+    assert created.case is not None
+    case_path = f"/internal/support-cases/{created.case.case_id}"
+    supervisor_app = _app_with_service(service, scope=SUPERVISOR_SCOPE)
+    agent_app = _app_with_service(service, scope=AGENT_SCOPE)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=supervisor_app),
+        base_url="http://test",
+    ) as client:
+        assigned = await client.post(
+            f"{case_path}/assign",
+            json={"agent_id": "agent-7", "request_id": "api-assign-1"},
+        )
+        duplicate = await client.post(
+            f"{case_path}/assign",
+            json={"agent_id": "agent-7", "request_id": "api-assign-1"},
+        )
+
+    assert assigned.status_code == 200
+    assert assigned.json()["action"] == "assigned"
+    assert assigned.json()["case"]["assigned_agent_id"] == "agent-7"
+    assert duplicate.json()["action"] == "status_unchanged"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=agent_app),
+        base_url="http://test",
+    ) as client:
+        visible = await client.get(case_path)
+        changed = await client.post(
+            f"{case_path}/status",
+            json={"target_status": "in_progress", "request_id": "api-status-2"},
+        )
+        forbidden = await client.post(
+            f"{case_path}/assign",
+            json={"agent_id": "agent-8", "request_id": "api-assign-2"},
+        )
+
+    assert visible.status_code == 200
+    assert changed.status_code == 200
+    assert forbidden.status_code == 403
+
+
+async def test_assign_rejects_reserved_agent_id() -> None:
+    repository = InMemoryCaseRepository()
+    service = CaseService(repository, clock=lambda: NOW)
+    created = await _create_case(service)
+    assert created.case is not None
+    app = _app_with_service(service, scope=SUPERVISOR_SCOPE)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/internal/support-cases/{created.case.case_id}/assign",
+            json={"agent_id": "system", "request_id": "api-assign-1"},
+        )
+
+    assert response.status_code == 422
+
+
+async def test_cross_tenant_case_is_not_visible() -> None:
+    repository = InMemoryCaseRepository()
+    service = CaseService(repository, clock=lambda: NOW)
+    created = await _create_case(service)
+    assert created.case is not None
+    other_tenant = make_scope("customer", user_id="customer-a", tenant_id="tenant-other")
+    app = _app_with_service(service, scope=other_tenant)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            f"/internal/support-cases/{created.case.case_id}"
+        )
+
+    assert response.status_code == 404

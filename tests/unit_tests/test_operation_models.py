@@ -35,6 +35,8 @@ def test_exchange_requires_a_replacement_variant() -> None:
             order_id="ORD-10001",
             operation_type="exchange",
             reason="size_or_variant_issue",
+            customer_id="customer-a",
+            tenant_id="tenant-demo",
         )
 
 
@@ -46,6 +48,8 @@ def test_cancellation_rejects_a_return_only_reason() -> None:
             order_id="ORD-10001",
             operation_type="cancellation",
             reason="damaged_item",
+            customer_id="customer-a",
+            tenant_id="tenant-demo",
         )
 
 
@@ -58,6 +62,8 @@ def test_return_rejects_a_replacement_variant() -> None:
             operation_type="return",
             reason="changed_mind",
             replacement_variant_id="variant-blue",
+            customer_id="customer-a",
+            tenant_id="tenant-demo",
         )
 
 

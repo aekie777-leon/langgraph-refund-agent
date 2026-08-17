@@ -9,6 +9,7 @@ from langgraph.types import Command
 
 from agent import graph as graph_module
 from agent import models
+from agent.auth.provider import UnauthenticatedError
 from agent.cases.service import CaseService
 from agent.operations.demo_provider import DemoOrderProvider
 from agent.operations.service import OperationService
@@ -19,6 +20,7 @@ from agent.schemas import (
     Route,
     SemanticRiskDetection,
 )
+from tests.fakes.identity import config_with_identity
 from tests.operation_support import InMemoryOperationRepository
 from tests.support_cases import InMemoryCaseRepository
 
@@ -245,7 +247,7 @@ def resumable_operation_graph(
 
 
 def _run_config(thread_id: str):
-    return {"configurable": {"thread_id": thread_id}}
+    return config_with_identity("customer", thread_id=thread_id)
 
 
 async def test_graph_requests_an_order_number(refund_graph) -> None:
@@ -259,7 +261,8 @@ async def test_graph_requests_an_order_number(refund_graph) -> None:
 
 async def test_graph_handles_unknown_order(refund_graph) -> None:
     result = await refund_graph.ainvoke(
-        {"messages": [HumanMessage(content="Refund ORD-99999 please.")]}
+        {"messages": [HumanMessage(content="Refund ORD-99999 please.")]},
+        config=_run_config("unknown-order-thread"),
     )
 
     assert result["search_success"] is False
@@ -268,7 +271,8 @@ async def test_graph_handles_unknown_order(refund_graph) -> None:
 
 async def test_graph_rejects_expired_order(refund_graph) -> None:
     result = await refund_graph.ainvoke(
-        {"messages": [HumanMessage(content="Refund ORD-10003 please.")]}
+        {"messages": [HumanMessage(content="Refund ORD-10003 please.")]},
+        config=_run_config("expired-order-thread"),
     )
 
     assert result["eligible"] is False
@@ -298,7 +302,8 @@ async def test_graph_routes_large_refund_to_manual_review(refund_graph) -> None:
 
 async def test_graph_interrupts_before_automatic_refund(refund_graph) -> None:
     result = await refund_graph.ainvoke(
-        {"messages": [HumanMessage(content="Refund ORD-10001 please.")]}
+        {"messages": [HumanMessage(content="Refund ORD-10001 please.")]},
+        config=_run_config("automatic-refund-thread"),
     )
 
     assert result["eligible"] is True
@@ -308,7 +313,8 @@ async def test_graph_interrupts_before_automatic_refund(refund_graph) -> None:
 
 async def test_graph_returns_order_information_for_an_inquiry(refund_graph) -> None:
     result = await refund_graph.ainvoke(
-        {"messages": [HumanMessage(content="What is the status of ORD-10001?")]}
+        {"messages": [HumanMessage(content="What is the status of ORD-10001?")]},
+        config=_run_config("order-inquiry-thread"),
     )
 
     assert result["decision"] == "order_inquiry"
@@ -423,7 +429,8 @@ async def test_graph_reuses_an_explicitly_referenced_order(refund_graph) -> None
         {
             "messages": [HumanMessage(content="Please refund this order.")],
             "last_order_id": "ORD-10001",
-        }
+        },
+        config=_run_config("reused-order-thread"),
     )
 
     assert result["order_id"] == "ORD-10001"
@@ -883,3 +890,75 @@ async def test_graph_lists_support_cases_only_for_the_current_thread(
 
     assert "delivery_investigation" in result["messages"][-1].content
     assert "Support cases for this conversation" in result["messages"][-1].content
+
+
+async def test_graph_denies_another_customers_order(refund_graph) -> None:
+    result = await refund_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="What is the status of ORD-10001?")
+            ]
+        },
+        config=config_with_identity("customer", user_id="customer-b"),
+    )
+
+    assert result["search_success"] is False
+    assert "Order not found" in result["messages"][-1].content
+
+
+async def test_graph_allows_own_safety_order(refund_graph) -> None:
+    result = await refund_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="What is the status of ORD-20001?")
+            ]
+        },
+        config=config_with_identity("customer", user_id="customer-b"),
+    )
+
+    assert result["search_success"] is True
+    assert result["last_order_id"] == "ORD-20001"
+    assert "Status: delivered" in result["messages"][-1].content
+
+
+async def test_graph_denies_other_tenant_order(refund_graph) -> None:
+    result = await refund_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="What is the status of ORD-30001?")
+            ]
+        },
+        config=config_with_identity("customer", user_id="customer-a"),
+    )
+
+    assert result["search_success"] is False
+    assert "Order not found" in result["messages"][-1].content
+
+
+async def test_graph_fails_closed_without_identity(refund_graph) -> None:
+    with pytest.raises(UnauthenticatedError):
+        await refund_graph.ainvoke(
+            {
+                "messages": [
+                    HumanMessage(content="What is the status of ORD-10001?")
+                ]
+            },
+            config={"configurable": {"thread_id": "no-auth-thread"}},
+        )
+
+
+async def test_graph_state_does_not_contain_identity_or_credentials(
+    refund_graph,
+) -> None:
+    result = await refund_graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="What is the status of ORD-10001?")
+            ]
+        },
+        config=_run_config("no-token-state-thread"),
+    )
+
+    assert "langgraph_auth_user" not in result
+    assert "Bearer" not in str(result)
+    assert "token" not in str(result).lower()

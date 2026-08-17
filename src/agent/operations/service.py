@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from agent.auth.models import AccessScope
 from agent.operations.models import (
     OperationDecision,
     OperationRecordStatus,
@@ -71,15 +72,16 @@ class OperationService:
         self._id_factory = id_factory
         self._max_write_attempts = max_write_attempts
 
-    async def get_operation(self, operation_id: UUID) -> OrderOperation:
+    async def get_operation(self, scope: AccessScope, operation_id: UUID) -> OrderOperation:
         """Return one operation or raise when it does not exist."""
-        operation = await self._repository.get_operation(operation_id)
+        operation = await self._repository.get_operation(scope, operation_id)
         if operation is None:
             raise OperationNotFoundError(str(operation_id))
         return operation
 
     async def create_pending_operation(
         self,
+        scope: AccessScope,
         *,
         request: OrderOperationRequest,
         snapshot: OrderSnapshot,
@@ -87,6 +89,8 @@ class OperationService:
         request_excerpt: str,
     ) -> OperationServiceResult:
         """Persist a confirmation-gated operation from an eligible policy result."""
+        if scope.customer_id is None:
+            raise ValueError("only customers may create order operations")
         excerpt = request_excerpt.strip()
         if not excerpt:
             raise ValueError("request_excerpt must not be empty")
@@ -101,6 +105,7 @@ class OperationService:
 
         for _attempt in range(self._max_write_attempts):
             duplicate = await self._repository.find_by_source_message(
+                scope,
                 thread_id=request.thread_id,
                 source_message_id=request.source_message_id,
             )
@@ -110,7 +115,10 @@ class OperationService:
                     operation=duplicate,
                 )
 
-            active = await self._repository.find_active_by_order_id(request.order_id)
+            active = await self._repository.find_active_by_order_id(
+                scope,
+                request.order_id,
+            )
             if active is not None:
                 return OperationServiceResult(
                     action="duplicate_ignored",
@@ -118,6 +126,7 @@ class OperationService:
                 )
 
             operation, event = self._build_pending_operation(
+                scope,
                 request=request,
                 snapshot=snapshot,
                 decision=decision,
@@ -125,6 +134,7 @@ class OperationService:
             )
             try:
                 await self._repository.create_operation_with_events(
+                    scope,
                     operation=operation,
                     events=(event,),
                 )
@@ -141,6 +151,7 @@ class OperationService:
             )
 
         duplicate = await self._repository.find_by_source_message(
+            scope,
             thread_id=request.thread_id,
             source_message_id=request.source_message_id,
         )
@@ -149,7 +160,7 @@ class OperationService:
                 action="duplicate_ignored",
                 operation=duplicate,
             )
-        active = await self._repository.find_active_by_order_id(request.order_id)
+        active = await self._repository.find_active_by_order_id(scope, request.order_id)
         if active is not None:
             return OperationServiceResult(
                 action="duplicate_ignored",
@@ -161,43 +172,49 @@ class OperationService:
 
     async def confirm_operation(
         self,
+        scope: AccessScope,
         *,
         operation_id: UUID,
         request_id: str,
-        actor: str,
     ) -> OperationServiceResult:
         """Record customer confirmation for an operation that needs manual review."""
-        operation = await self.get_operation(operation_id)
+        operation = await self.get_operation(scope, operation_id)
         if not operation.requires_manual_review:
             raise ValueError(
                 "automatic operations must use submit_confirmed_operation"
             )
         return await self._change_from_pending(
+            scope,
             operation_id=operation_id,
             request_id=request_id,
-            actor=actor,
             target_status=None,
             action="confirmed",
         )
 
     async def submit_confirmed_operation(
         self,
+        scope: AccessScope,
         *,
         operation_id: UUID,
         request_id: str,
-        actor: str,
         provider: OrderProvider,
     ) -> OperationServiceResult:
         """Submit one confirmed automatic operation with provider idempotency."""
-        request_id, actor = self._validate_request_metadata(request_id, actor)
+        request_id = request_id.strip()
+        actor = scope.identity
+        if not request_id:
+            raise ValueError("request_id must not be empty")
         idempotency_key = f"operation:{operation_id}:submitted:{request_id}"
-        prior = await self._repository.find_event_by_idempotency_key(idempotency_key)
+        prior = await self._repository.find_event_by_idempotency_key(
+            scope,
+            idempotency_key,
+        )
         if prior is not None:
-            return await self._unchanged_result(prior.operation_id)
+            return await self._unchanged_result(scope, prior.operation_id)
 
         last_conflict: RuntimeError | None = None
         for _attempt in range(self._max_write_attempts):
-            current = await self.get_operation(operation_id)
+            current = await self.get_operation(scope, operation_id)
             if current.requires_manual_review:
                 raise ValueError("manual-review operations must not be submitted to a provider")
             if current.status == "submitted" and current.provider_reference is not None:
@@ -214,6 +231,8 @@ class OperationService:
                 operation_type=current.operation_type,
                 reason=current.request_reason_code,
                 replacement_variant_id=current.replacement_variant_id,
+                customer_id=current.customer_id,
+                tenant_id=current.tenant_id,
             )
             provider_operation = await provider.submit_operation(
                 request=request,
@@ -235,10 +254,13 @@ class OperationService:
                 operation_id=current.operation_id,
                 event_type="confirmation_recorded",
                 actor=actor,
+                customer_id=current.customer_id,
+                tenant_id=current.tenant_id,
                 created_at=updated.updated_at,
             )
             try:
                 await self._repository.update_operation_with_events(
+                    scope,
                     operation=updated,
                     events=(confirmation_event, status_event),
                     expected_version=current.version,
@@ -246,10 +268,11 @@ class OperationService:
             except (ConcurrentOperationUpdateError, DuplicateOperationIdempotencyError) as error:
                 last_conflict = error
                 prior = await self._repository.find_event_by_idempotency_key(
-                    idempotency_key
+                    scope,
+                    idempotency_key,
                 )
                 if prior is not None:
-                    return await self._unchanged_result(prior.operation_id)
+                    return await self._unchanged_result(scope, prior.operation_id)
                 continue
             return OperationServiceResult(
                 action="submitted",
@@ -263,22 +286,23 @@ class OperationService:
 
     async def cancel_pending_operation(
         self,
+        scope: AccessScope,
         *,
         operation_id: UUID,
         request_id: str,
-        actor: str,
     ) -> OperationServiceResult:
         """Record that the customer declined a not-yet-submitted operation."""
         return await self._change_from_pending(
+            scope,
             operation_id=operation_id,
             request_id=request_id,
-            actor=actor,
             target_status="cancelled_by_customer",
             action="cancelled",
         )
 
     async def update_operation_status(
         self,
+        scope: AccessScope,
         *,
         operation_id: UUID,
         target_status: OperationRecordStatus,
@@ -293,13 +317,16 @@ class OperationService:
                 "a persisted operation cannot return to pending_confirmation"
             )
         idempotency_key = f"operation:{operation_id}:status:{request_id}"
-        prior = await self._repository.find_event_by_idempotency_key(idempotency_key)
+        prior = await self._repository.find_event_by_idempotency_key(
+            scope,
+            idempotency_key,
+        )
         if prior is not None:
-            return await self._unchanged_result(prior.operation_id)
+            return await self._unchanged_result(scope, prior.operation_id)
 
         last_conflict: RuntimeError | None = None
         for _attempt in range(self._max_write_attempts):
-            current = await self.get_operation(operation_id)
+            current = await self.get_operation(scope, operation_id)
             if current.status == target_status:
                 return OperationServiceResult(action="status_unchanged", operation=current)
             self._validate_status_transition(current.status, target_status)
@@ -312,6 +339,7 @@ class OperationService:
             )
             try:
                 await self._repository.update_operation_with_events(
+                    scope,
                     operation=updated,
                     events=(event,),
                     expected_version=current.version,
@@ -319,10 +347,11 @@ class OperationService:
             except (ConcurrentOperationUpdateError, DuplicateOperationIdempotencyError) as error:
                 last_conflict = error
                 prior = await self._repository.find_event_by_idempotency_key(
-                    idempotency_key
+                    scope,
+                    idempotency_key,
                 )
                 if prior is not None:
-                    return await self._unchanged_result(prior.operation_id)
+                    return await self._unchanged_result(scope, prior.operation_id)
                 continue
             return OperationServiceResult(
                 action="status_changed",
@@ -335,22 +364,27 @@ class OperationService:
 
     async def attach_support_case(
         self,
+        scope: AccessScope,
         *,
         operation_id: UUID,
         support_case_id: UUID,
         request_id: str,
-        actor: str,
     ) -> OperationServiceResult:
         """Link the manual-review operation to the support case created for it."""
-        request_id, actor = self._validate_request_metadata(request_id, actor)
+        request_id = request_id.strip()
+        if not request_id:
+            raise ValueError("request_id must not be empty")
         idempotency_key = f"operation:{operation_id}:support-case:{request_id}"
-        prior = await self._repository.find_event_by_idempotency_key(idempotency_key)
+        prior = await self._repository.find_event_by_idempotency_key(
+            scope,
+            idempotency_key,
+        )
         if prior is not None:
-            return await self._unchanged_result(prior.operation_id)
+            return await self._unchanged_result(scope, prior.operation_id)
 
         last_conflict: RuntimeError | None = None
         for _attempt in range(self._max_write_attempts):
-            current = await self.get_operation(operation_id)
+            current = await self.get_operation(scope, operation_id)
             if not current.requires_manual_review or current.status != "manual_review":
                 raise ValueError("only a manual-review operation may receive a support case")
             if current.support_case_id is not None:
@@ -374,11 +408,14 @@ class OperationService:
                 operation_id=current.operation_id,
                 event_type="support_case_attached",
                 support_case_id=support_case_id,
-                actor=actor,
+                actor="system",
+                customer_id=current.customer_id,
+                tenant_id=current.tenant_id,
                 created_at=now,
             )
             try:
                 await self._repository.update_operation_with_events(
+                    scope,
                     operation=updated,
                     events=(event,),
                     expected_version=current.version,
@@ -386,10 +423,11 @@ class OperationService:
             except (ConcurrentOperationUpdateError, DuplicateOperationIdempotencyError) as error:
                 last_conflict = error
                 prior = await self._repository.find_event_by_idempotency_key(
-                    idempotency_key
+                    scope,
+                    idempotency_key,
                 )
                 if prior is not None:
-                    return await self._unchanged_result(prior.operation_id)
+                    return await self._unchanged_result(scope, prior.operation_id)
                 continue
             return OperationServiceResult(
                 action="support_case_attached",
@@ -402,6 +440,7 @@ class OperationService:
 
     def _build_pending_operation(
         self,
+        scope: AccessScope,
         *,
         request: OrderOperationRequest,
         snapshot: OrderSnapshot,
@@ -409,6 +448,7 @@ class OperationService:
         request_excerpt: str,
     ) -> tuple[OrderOperation, OrderOperationEvent]:
         """Build an immutable initial operation and its creation event."""
+        assert scope.customer_id is not None
         now = self._clock()
         operation_id = self._id_factory()
         recommendation = decision.case_recommendation
@@ -435,6 +475,9 @@ class OperationService:
             status="pending_confirmation",
             created_at=now,
             updated_at=now,
+            customer_id=scope.customer_id,
+            tenant_id=scope.tenant_id,
+            created_by=scope.identity,
         )
         event = OrderOperationEvent(
             event_id=self._id_factory(),
@@ -442,29 +485,37 @@ class OperationService:
             operation_id=operation_id,
             event_type="operation_created",
             actor="system",
+            customer_id=scope.customer_id,
+            tenant_id=scope.tenant_id,
             created_at=now,
         )
         return operation, event
 
     async def _change_from_pending(
         self,
+        scope: AccessScope,
         *,
         operation_id: UUID,
         request_id: str,
-        actor: str,
         target_status: OperationRecordStatus | None,
         action: OperationServiceAction,
     ) -> OperationServiceResult:
         """Handle the only two customer decisions available before submission."""
-        request_id, actor = self._validate_request_metadata(request_id, actor)
+        request_id = request_id.strip()
+        actor = scope.identity
+        if not request_id:
+            raise ValueError("request_id must not be empty")
         idempotency_key = f"operation:{operation_id}:{action}:{request_id}"
-        prior = await self._repository.find_event_by_idempotency_key(idempotency_key)
+        prior = await self._repository.find_event_by_idempotency_key(
+            scope,
+            idempotency_key,
+        )
         if prior is not None:
-            return await self._unchanged_result(prior.operation_id)
+            return await self._unchanged_result(scope, prior.operation_id)
 
         last_conflict: RuntimeError | None = None
         for _attempt in range(self._max_write_attempts):
-            current = await self.get_operation(operation_id)
+            current = await self.get_operation(scope, operation_id)
             if current.status != "pending_confirmation":
                 if action == "confirmed" and current.status in _ACTIVE_STATUSES:
                     return OperationServiceResult(
@@ -500,6 +551,8 @@ class OperationService:
                     operation_id=current.operation_id,
                     event_type="confirmation_recorded",
                     actor=actor,
+                    customer_id=current.customer_id,
+                    tenant_id=current.tenant_id,
                     created_at=updated.updated_at,
                 )
                 events = (decision_event, status_event)
@@ -510,6 +563,7 @@ class OperationService:
                 events = (status_event,)
             try:
                 await self._repository.update_operation_with_events(
+                    scope,
                     operation=updated,
                     events=events,
                     expected_version=current.version,
@@ -517,10 +571,11 @@ class OperationService:
             except (ConcurrentOperationUpdateError, DuplicateOperationIdempotencyError) as error:
                 last_conflict = error
                 prior = await self._repository.find_event_by_idempotency_key(
-                    idempotency_key
+                    scope,
+                    idempotency_key,
                 )
                 if prior is not None:
-                    return await self._unchanged_result(prior.operation_id)
+                    return await self._unchanged_result(scope, prior.operation_id)
                 continue
             return OperationServiceResult(
                 action=action,
@@ -559,15 +614,21 @@ class OperationService:
             current_status=target_status,
             provider_reference=updated.provider_reference,
             actor=actor,
+            customer_id=current.customer_id,
+            tenant_id=current.tenant_id,
             created_at=now,
         )
         return updated, event
 
-    async def _unchanged_result(self, operation_id: UUID) -> OperationServiceResult:
+    async def _unchanged_result(
+        self,
+        scope: AccessScope,
+        operation_id: UUID,
+    ) -> OperationServiceResult:
         """Return the aggregate for an already-recorded idempotent request."""
         return OperationServiceResult(
             action="status_unchanged",
-            operation=await self.get_operation(operation_id),
+            operation=await self.get_operation(scope, operation_id),
         )
 
     @staticmethod

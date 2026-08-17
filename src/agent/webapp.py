@@ -18,6 +18,9 @@ from agent.operations.runtime import (
     configure_operation_dependencies,
 )
 from agent.operations.service import OperationService
+from agent.refunds.postgres_repository import PostgresRefundRepository
+from agent.refunds.runtime import clear_refund_service, configure_refund_service
+from agent.refunds.service import RefundService
 
 
 @asynccontextmanager
@@ -32,9 +35,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             order_provider=DemoOrderProvider(),
             operation_service=OperationService(PostgresOrderOperationRepository(pool)),
         )
+        configure_refund_service(RefundService(PostgresRefundRepository(pool)))
         try:
             yield
         finally:
+            clear_refund_service()
             clear_operation_dependencies()
             clear_case_service()
     finally:
@@ -43,7 +48,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="OpsPilot Internal API",
-    version="0.5.1",
+    version="0.6.0",
     lifespan=lifespan,
 )
 app.include_router(support_case_router)

@@ -5,6 +5,7 @@ from typing import Any, cast
 
 from langchain_core.runnables import RunnableConfig
 
+from agent.auth.context import require_scope
 from agent.cases.models import (
     CaseServiceResult,
     CaseTrigger,
@@ -139,6 +140,7 @@ def build_finalize_case_handoff_node(
 
         trigger = build_case_trigger(state, config)
         result = await service_provider().record_handoff(
+            require_scope(config),
             trigger=trigger,
             decision=decision,
         )

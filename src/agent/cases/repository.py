@@ -3,6 +3,7 @@
 from typing import Protocol
 from uuid import UUID
 
+from agent.auth.models import AccessScope
 from agent.cases.models import (
     CaseListQuery,
     CaseType,
@@ -40,12 +41,13 @@ class CasePersistenceError(RuntimeError):
 class CaseRepository(Protocol):
     """Define storage operations required by the case service."""
 
-    async def get_case(self, case_id: UUID) -> SupportCase | None:
-        """Return a case by ID."""
+    async def get_case(self, scope: AccessScope, case_id: UUID) -> SupportCase | None:
+        """Return a case by ID within the caller's access scope."""
         ...
 
     async def find_by_source_message(
         self,
+        scope: AccessScope,
         *,
         thread_id: str,
         source_message_id: str,
@@ -55,6 +57,7 @@ class CaseRepository(Protocol):
 
     async def find_event_by_idempotency_key(
         self,
+        scope: AccessScope,
         idempotency_key: str,
     ) -> SupportCaseEvent | None:
         """Find a previously recorded operation event."""
@@ -62,6 +65,7 @@ class CaseRepository(Protocol):
 
     async def find_unresolved_case(
         self,
+        scope: AccessScope,
         *,
         thread_id: str,
         case_type: CaseType,
@@ -71,6 +75,7 @@ class CaseRepository(Protocol):
 
     async def list_cases(
         self,
+        scope: AccessScope,
         query: CaseListQuery,
     ) -> SupportCasePage:
         """Return a filtered and stably ordered page of cases."""
@@ -78,6 +83,7 @@ class CaseRepository(Protocol):
 
     async def list_case_events(
         self,
+        scope: AccessScope,
         *,
         case_id: UUID,
         limit: int,
@@ -88,6 +94,7 @@ class CaseRepository(Protocol):
 
     async def create_case_with_event(
         self,
+        scope: AccessScope,
         *,
         case: SupportCase,
         event: SupportCaseEvent,
@@ -97,6 +104,7 @@ class CaseRepository(Protocol):
 
     async def update_case_with_event(
         self,
+        scope: AccessScope,
         *,
         case: SupportCase,
         event: SupportCaseEvent,

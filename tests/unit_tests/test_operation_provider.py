@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from agent.operations.models import OrderOperationRequest, OrderSnapshot
-from agent.operations.provider import StaleOrderVersionError
+from agent.operations.provider import OrderNotAccessibleError, StaleOrderVersionError
 from tests.fakes.operations import InMemoryOrderProvider
 
 
@@ -25,6 +25,8 @@ def _snapshot() -> OrderSnapshot:
         payment_status="paid",
         fulfillment_status="unfulfilled",
         created_at=datetime(2026, 8, 1, tzinfo=UTC),
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
     )
 
 
@@ -35,6 +37,8 @@ def _request() -> OrderOperationRequest:
         order_id="ORD-10001",
         operation_type="cancellation",
         reason="no_longer_needed",
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
     )
 
 
@@ -55,7 +59,11 @@ async def test_fake_provider_submission_is_idempotent() -> None:
     )
 
     assert duplicate == first
-    order = await provider.get_order("ORD-10001")
+    order = await provider.get_order_for_customer(
+        order_id="ORD-10001",
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
+    )
     assert order is not None
     assert order.version == 2
     assert order.existing_operations == (first,)
@@ -82,9 +90,61 @@ async def test_fake_provider_returns_configured_replacement_availability() -> No
 
     assert await provider.get_replacement_availability(
         order_id="ORD-10001",
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
         replacement_variant_id="variant-blue",
     ) is True
     assert await provider.get_replacement_availability(
         order_id="ORD-10001",
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
         replacement_variant_id="variant-red",
     ) is None
+
+
+@pytest.mark.anyio
+async def test_fake_provider_denies_inaccessible_orders() -> None:
+    provider = InMemoryOrderProvider(orders=(_snapshot(),))
+
+    assert (
+        await provider.get_order_for_customer(
+            order_id="ORD-10001",
+            customer_id="customer-b",
+            tenant_id="tenant-demo",
+        )
+        is None
+    )
+    with pytest.raises(OrderNotAccessibleError):
+        await provider.get_replacement_availability(
+            order_id="ORD-10001",
+            customer_id="customer-b",
+            tenant_id="tenant-demo",
+            replacement_variant_id="variant-blue",
+        )
+    with pytest.raises(OrderNotAccessibleError):
+        await provider.submit_operation(
+            request=_request().model_copy(update={"customer_id": "customer-b"}),
+            expected_order_version=1,
+            idempotency_key="request-1",
+        )
+
+
+@pytest.mark.anyio
+async def test_fake_provider_rejects_snapshot_without_ownership() -> None:
+    anonymous = _snapshot().model_copy(update={"customer_id": None})
+    provider = InMemoryOrderProvider(orders=(anonymous,))
+
+    assert (
+        await provider.get_order_for_customer(
+            order_id="ORD-10001",
+            customer_id="customer-a",
+            tenant_id="tenant-demo",
+        )
+        is None
+    )
+    with pytest.raises(OrderNotAccessibleError):
+        await provider.submit_operation(
+            request=_request(),
+            expected_order_version=1,
+            idempotency_key="request-1",
+        )

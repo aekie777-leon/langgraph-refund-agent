@@ -135,6 +135,8 @@ class OrderSnapshot(BaseModel):
     return_eligible: bool | None = None
     exchange_eligible: bool | None = None
     existing_operations: tuple[ExistingOperation, ...] = Field(default_factory=tuple)
+    customer_id: str | None = None
+    tenant_id: str | None = None
 
 
 class OrderOperationRequest(BaseModel):
@@ -148,6 +150,8 @@ class OrderOperationRequest(BaseModel):
     operation_type: OperationType
     reason: OperationReason
     replacement_variant_id: str | None = Field(default=None, min_length=1)
+    customer_id: str = Field(min_length=1)
+    tenant_id: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_operation_specific_fields(self) -> Self:
@@ -275,6 +279,9 @@ class OrderOperation(BaseModel):
     created_at: AwareDatetime
     updated_at: AwareDatetime
     version: int = Field(default=1, ge=1)
+    customer_id: str = Field(min_length=1)
+    tenant_id: str = Field(min_length=1)
+    created_by: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_persisted_operation(self) -> Self:
@@ -286,6 +293,8 @@ class OrderOperation(BaseModel):
             operation_type=self.operation_type,
             reason=self.request_reason_code,
             replacement_variant_id=self.replacement_variant_id,
+            customer_id=self.customer_id,
+            tenant_id=self.tenant_id,
         )
         if self.requires_manual_review:
             if (
@@ -316,6 +325,8 @@ class OrderOperationEvent(BaseModel):
     provider_reference: str | None = Field(default=None, min_length=1)
     support_case_id: UUID | None = None
     actor: str = Field(min_length=1)
+    customer_id: str = Field(min_length=1)
+    tenant_id: str = Field(min_length=1)
     created_at: AwareDatetime
 
     @model_validator(mode="after")

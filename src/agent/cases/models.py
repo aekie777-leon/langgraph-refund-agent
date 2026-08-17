@@ -23,7 +23,12 @@ CaseType = Literal[
 ]
 CasePriority = Literal["p0", "p1", "p2", "p3"]
 CaseStatus = Literal["open", "in_progress", "on_hold", "resolved"]
-CaseEventType = Literal["case_created", "trigger_appended", "status_changed"]
+CaseEventType = Literal[
+    "case_created",
+    "trigger_appended",
+    "status_changed",
+    "assigned",
+]
 CaseServiceAction = Literal[
     "not_created",
     "created",
@@ -31,7 +36,9 @@ CaseServiceAction = Literal[
     "duplicate_ignored",
     "status_changed",
     "status_unchanged",
+    "assigned",
 ]
+RESERVED_AGENT_IDS = frozenset({"system", "legacy"})
 OnHoldReason = Literal[
     "waiting_customer",
     "waiting_external_system",
@@ -233,6 +240,10 @@ class SupportCase(BaseModel):
     created_at: AwareDatetime
     updated_at: AwareDatetime
     version: int = Field(default=1, ge=1)
+    customer_id: str = Field(min_length=1)
+    tenant_id: str = Field(min_length=1)
+    created_by: str = Field(min_length=1)
+    assigned_agent_id: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def validate_lifecycle_fields(self) -> Self:
@@ -270,7 +281,11 @@ class SupportCaseEvent(BaseModel):
     previous_status: CaseStatus | None = None
     current_status: CaseStatus | None = None
     on_hold_reason: OnHoldReason | None = None
+    previous_assigned_agent_id: str | None = Field(default=None, min_length=1)
+    current_assigned_agent_id: str | None = Field(default=None, min_length=1)
     actor: str | None = None
+    customer_id: str = Field(min_length=1)
+    tenant_id: str = Field(min_length=1)
     created_at: AwareDatetime
 
     @model_validator(mode="after")
@@ -289,6 +304,15 @@ class SupportCaseEvent(BaseModel):
                     "current_priority and current_status are required for "
                     "trigger events"
                 )
+            return self
+
+        if self.event_type == "assigned":
+            if self.current_assigned_agent_id is None:
+                raise ValueError(
+                    "current_assigned_agent_id is required for assigned events"
+                )
+            if not self.actor:
+                raise ValueError("actor is required for assigned events")
             return self
 
         if self.previous_status is None or self.current_status is None:
@@ -330,6 +354,7 @@ class CaseServiceResult(BaseModel):
             "created",
             "event_appended",
             "status_changed",
+            "assigned",
         )
         if writes_event and self.event is None:
             raise ValueError(f"{self.action} must contain an event")

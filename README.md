@@ -2,7 +2,34 @@
 
 A small, risk-aware customer-service assistant built with LangGraph. It classifies order operations, refund requests, order inquiries, delivery issues, and complaints; performs deterministic and semantic risk checks; keeps business eligibility decisions deterministic; asks for confirmation before state-changing operations; and stores order operations, refund requests, support cases, and immutable events in PostgreSQL.
 
-Version: `0.5.1`
+Version: `0.6.0`
+
+## What's new in v0.6.0
+
+- Adds a trusted identity boundary: every request is authenticated through a
+  swappable `IdentityProvider` (a deterministic demo provider for local
+  development) before any resource is touched
+- Restricts LangGraph threads, runs, and assistants through official
+  authentication and authorization handlers; thread ownership is stamped and
+  enforced with fail-closed filters
+- Adds `customer_id` / `tenant_id` / `created_by` ownership to refunds,
+  support cases, case events, order operations, and operation events
+  (additive migration `0005`); legacy rows are quarantined in a reserved
+  `legacy` tenant and are not visible to any live identity
+- Enforces `AccessScope` in every repository read and write; single-resource
+  lookups return 404 for both missing and unauthorized records (no
+  enumeration oracle)
+- Verifies order ownership for inquiries, refunds, cancellations, returns,
+  exchanges, and delivery investigations; both order data sources
+  (`orders.json` and `DemoOrderProvider`) share the same ownership rules
+  and consistent demo ownership
+- Protects the internal support-case API: `401` without credentials, `403`
+  for permission violations, `404` for inaccessible resources
+- Adds role-based access control for `customer`, `support_agent`, and
+  `supervisor`, including a supervisor-only case assignment endpoint with an
+  immutable `assigned` audit event (migration `0006`)
+- Never stores raw tokens or bearer credentials in graph state, PostgreSQL,
+  logs, or traces
 
 ## What's new in v0.5.1
 
@@ -135,16 +162,27 @@ failures rather than reporting a handoff that was not saved.
 ### Internal support-case API
 
 The custom FastAPI application exposes operational case endpoints under
-`/internal/support-cases` alongside the LangGraph Agent Server API:
+`/internal/support-cases` alongside the LangGraph Agent Server API. The API
+requires a valid bearer token (`401` without credentials) and enforces
+role-based permissions (`403` when the caller lacks the permission, `404` for
+inaccessible resources):
 
 - `GET /internal/support-cases` lists cases with optional `status`, `priority`,
   `case_type`, `thread_id`, and `order_id` filters;
 - `GET /internal/support-cases/{case_id}` returns one case;
 - `GET /internal/support-cases/{case_id}/events` returns its immutable audit events;
-- `POST /internal/support-cases/{case_id}/status` applies an idempotent status change.
+- `POST /internal/support-cases/{case_id}/status` applies an idempotent status change;
+- `POST /internal/support-cases/{case_id}/assign` assigns a case to a support
+  agent (`supervisor` only) and appends an immutable `assigned` event.
 
-The status request requires a stable `request_id` and an `actor`. Moving a case
-to `on_hold` additionally requires `on_hold_reason`. See
+Role permissions: customers read their own cases only; support agents read and
+update cases assigned to them; supervisors manage the whole tenant queue and
+can assign cases. See [`docs/internal_case_api.md`](docs/internal_case_api.md)
+for request examples, error codes, lifecycle rules, and deployment limitations.
+
+The status request requires a stable `request_id`; the audit actor is derived
+from the authenticated identity and cannot be supplied by the caller. Moving a
+case to `on_hold` additionally requires `on_hold_reason`. See
 [`docs/internal_case_api.md`](docs/internal_case_api.md) for request examples,
 error codes, lifecycle rules, and deployment limitations.
 
@@ -247,8 +285,20 @@ LangGraph's internal tables.
 Install and run the LangGraph development server:
 
 ```bash
-uvx --from "langgraph-cli[inmem]" langgraph dev
+uv run --with "langgraph-cli[inmem]" langgraph dev
 ```
+
+The `uv run --with` form runs the CLI inside the project's virtual environment
+so the installed `agent` package is importable. The server starts on port
+`2024`.
+
+Before talking to the API, configure demo identities in `.env`:
+
+```dotenv
+DEMO_IDENTITY_TOKENS={"demo-customer-token":{"user_id":"customer-a","tenant_id":"tenant-demo","role":"customer"}}
+```
+
+Every request must then send `Authorization: Bearer demo-customer-token`.
 
 The graph entry point is configured in `langgraph.json` as `agent.graph:create_graph` through the source file path.
 
@@ -434,13 +484,21 @@ tests on both supported Python versions.
 
 - Never commit `.env` or real credentials. The repository ignores `.env` by default.
 - The included order database is demonstration data, not customer data.
-- A production service must authenticate users and verify that an order belongs to the requesting user.
-- Add authorization, audit logging, monitoring, rate limits, encrypted secret management, and a real order service before production use.
+- The demo identity provider maps bearer tokens from `DEMO_IDENTITY_TOKENS`
+  and is for local development only. Production must replace
+  `IdentityProvider` with the customer's OAuth/OIDC, SSO, or identity system.
+- Assignment (`POST /{case_id}/assign`) validates the agent identifier but
+  does not verify the agent exists in a user directory; production must
+  resolve assignees against the real identity system.
+- A production service must authenticate users and verify that an order
+  belongs to the requesting user.
+- Add authorization, audit logging, monitoring, rate limits, encrypted secret
+  management, and a real order service before production use.
 - Review the refund policy and manual-review threshold with the responsible business and legal teams.
 - Risk and manual-refund handoffs are persisted as support cases, but no external customer-service queue adapter is connected yet.
-- The v0.4 internal support-case API has no application-level authentication.
-  Compose binds it to `127.0.0.1`; do not expose it to an external network until
-  authentication and authorization are configured at the Agent Server or gateway.
+- The internal support-case API is authenticated and role-protected from
+  v0.6. Compose binds it to `127.0.0.1`; do not expose it to an external
+  network without additional gateway controls such as rate limiting.
 - Human-request and formal-complaint detection use LLM structured output and therefore require production evaluation against representative multilingual conversations.
 - The bundled risk rules are intentionally conservative demonstration data, not a complete safety or compliance vocabulary.
 - Semantic risk classification depends on the configured model and may vary across wording or languages. Validate the policy, prompts, and responses with qualified safety, legal, and compliance reviewers before production use.
@@ -455,7 +513,30 @@ Released under the MIT License. See `LICENSE`.
 
 这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别订单操作、退款申请、订单查询、物流问题和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断业务资格，在会改变状态的操作前请求用户确认，并把订单操作、退款申请、人工工单和不可变事件保存到 PostgreSQL。
 
-版本：`0.5.1`
+版本：`0.6.0`
+
+## v0.6.0 新增内容
+
+- 引入可信身份边界：每个请求在接触任何资源前，都必须先通过可替换的
+  `IdentityProvider`（本地开发使用确定性的 demo provider）完成认证；
+- 通过官方 authentication / authorization handler 限制 LangGraph 的
+  thread、run 和 assistant；thread 所有者会被写入并强制校验，未授权资源
+  默认拒绝；
+- 为退款、工单、工单事件、订单操作和操作事件增加
+  `customer_id` / `tenant_id` / `created_by` 归属字段（additive migration
+  `0005`）；legacy 数据被隔离到保留的 `legacy` 租户，任何真实身份都不可见；
+- Repository 的所有读写都强制携带 `AccessScope`；单个资源查询对"不存在"
+  和"无权访问"统一返回 404（防枚举）；
+- 订单查询、退款、取消、退货、换货和物流调查全部验证订单归属；两条订单
+  数据源（`orders.json` 与 `DemoOrderProvider`）共用同一套归属规则，且演示
+  归属保持一致；
+- 内部工单 API 增加保护：无凭据返回 401，权限不足返回 403，资源不可见
+  返回 404；
+- 实现 `customer` / `support_agent` / `supervisor` 三种角色的权限控制，
+  新增仅 supervisor 可用的工单分配端点，并记录不可变的 `assigned` 审计
+  事件（migration `0006`）；
+- 原始 Token 或 Bearer 凭据不会写入 Graph state、PostgreSQL、日志或
+  LangSmith trace。
 
 ## v0.5.1 新增内容
 
@@ -588,16 +669,25 @@ ID。PostgreSQL 写入失败会明确导致本次 Run 失败，不会返回一�
 ### 内部工单 API
 
 自定义 FastAPI 应用会在 LangGraph Agent Server API 旁边提供
-`/internal/support-cases` 下的工单操作接口：
+`/internal/support-cases` 下的工单操作接口。该 API 需要有效 Bearer Token
+（无凭据返回 401），并按角色执行权限控制（权限不足返回 403，资源不可见
+返回 404）：
 
 - `GET /internal/support-cases`：按照 `status`、`priority`、`case_type`、
   `thread_id` 或 `order_id` 筛选工单；
 - `GET /internal/support-cases/{case_id}`：查询单个工单；
 - `GET /internal/support-cases/{case_id}/events`：查询不可变的审计事件；
-- `POST /internal/support-cases/{case_id}/status`：执行幂等的状态变更。
+- `POST /internal/support-cases/{case_id}/status`：执行幂等的状态变更；
+- `POST /internal/support-cases/{case_id}/assign`：把工单分配给客服
+  （仅 supervisor），并追加不可变的 `assigned` 事件。
 
-状态请求必须提供稳定的 `request_id` 和操作人 `actor`。将工单改为
-`on_hold` 时还必须提供 `on_hold_reason`。请求示例、错误码、状态规则和部署
+角色权限：customer 只能查看自己的工单；support_agent 只能读取和修改分配
+给自己的工单；supervisor 管理整个租户队列并可以分配工单。请求示例、错误码、
+状态规则和部署限制详见
+[`docs/internal_case_api.md`](docs/internal_case_api.md)。
+
+状态请求必须提供稳定的 `request_id`；审计操作人由已认证身份生成，调用方不能
+自行传入。将工单改为 `on_hold` 时还必须提供 `on_hold_reason`。请求示例、错误码、状态规则和部署
 限制详见 [`docs/internal_case_api.md`](docs/internal_case_api.md)。
 
 ### 恢复订单优先级 interrupt
@@ -690,8 +780,19 @@ uv run python scripts/apply_migrations.py
 启动 LangGraph 开发服务器：
 
 ```bash
-uvx --from "langgraph-cli[inmem]" langgraph dev
+uv run --with "langgraph-cli[inmem]" langgraph dev
 ```
+
+`uv run --with` 会在项目自己的虚拟环境中运行 CLI，保证已安装的 `agent`
+包可以被导入。服务器监听 `2024` 端口。
+
+调用 API 前，先在 `.env` 中配置 demo 身份：
+
+```dotenv
+DEMO_IDENTITY_TOKENS={"demo-customer-token":{"user_id":"customer-a","tenant_id":"tenant-demo","role":"customer"}}
+```
+
+之后每个请求都需要携带 `Authorization: Bearer demo-customer-token`。
 
 图入口已在 `langgraph.json` 中配置。
 
@@ -868,13 +969,18 @@ uv run pytest -m postgres tests/integration_tests/test_postgres_case_repository.
 
 - 不要提交 `.env` 或任何真实密钥；仓库已经默认忽略 `.env`。
 - 内置订单只是演示数据，不能保存真实客户信息。
+- demo 身份提供者从 `DEMO_IDENTITY_TOKENS` 解析 Bearer Token，仅用于本地
+  开发；生产环境必须把 `IdentityProvider` 替换为客户 OAuth/OIDC、SSO 或
+  自建身份系统。
+- 工单分配（`POST /{case_id}/assign`）只校验客服标识格式，不验证该客服
+  是否真实存在于用户目录；生产环境必须对接真实身份系统解析被分配人。
 - 生产服务必须验证用户身份，并确认订单确实属于发起请求的用户。
 - 上线前需要补充权限控制、审计日志、监控、限流和加密密钥管理，并接入真实订单服务。
 - 退款规则和人工审核金额阈值需要由相应的业务及法务人员确认。
 - 风险和大额退款交接已经持久化为人工工单，但尚未连接外部客户客服队列适配器。
-- v0.4 内部工单 API 暂未实现应用层鉴权。Compose 只把它绑定到
-  `127.0.0.1`；在 Agent Server 或网关配置身份认证和权限控制之前，不应将
-  该接口暴露到外部网络。
+- 内部工单 API 自 v0.6 起已启用认证与角色保护。Compose 只把它绑定到
+  `127.0.0.1`；在没有额外的网关控制（如限流）之前，不应将该接口暴露到
+  外部网络。
 - 真人请求和正式投诉识别依赖 LLM 结构化输出，上线前仍需使用有代表性的多语言对话进行评测。
 - 内置风险规则是有意保持保守的演示数据，并不是完整的安全或合规词库。
 - 语义风险分类取决于所配置的模型，可能因措辞或语言不同而产生差异。投入生产环境前，应由专业的安全、法务和合规人员验证规则、提示词和回复内容。

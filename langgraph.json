@@ -7,6 +7,10 @@
   "http": {
     "app": "./src/agent/webapp.py:app"
   },
+  "auth": {
+    "path": "./src/agent/auth/langgraph_auth.py:auth",
+    "disable_studio_auth": true
+  },
   "env": ".env",
   "image_distro": "wolfi"
 }

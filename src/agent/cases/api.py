@@ -5,7 +5,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 
-from agent.cases.api_models import ApiErrorResponse, ChangeCaseStatusRequest
+from agent.auth.dependencies import require_access_scope
+from agent.auth.models import AccessScope
+from agent.cases.api_models import (
+    ApiErrorResponse,
+    AssignCaseRequest,
+    ChangeCaseStatusRequest,
+)
 from agent.cases.models import (
     CaseListQuery,
     CasePriority,
@@ -28,6 +34,10 @@ CaseServiceDependency = Annotated[
     CaseService,
     Depends(get_case_service),
 ]
+AccessScopeDependency = Annotated[
+    AccessScope,
+    Depends(require_access_scope),
+]
 Limit = Annotated[int, Query(ge=1, le=100)]
 EventLimit = Annotated[int, Query(ge=1, le=200)]
 Offset = Annotated[int, Query(ge=0)]
@@ -37,6 +47,7 @@ NonEmptyFilter = Annotated[
 ]
 
 _COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    403: {"model": ApiErrorResponse},
     404: {"model": ApiErrorResponse},
     409: {"model": ApiErrorResponse},
     503: {"model": ApiErrorResponse},
@@ -49,6 +60,7 @@ _COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     responses={503: {"model": ApiErrorResponse}},
 )
 async def list_support_cases(
+    scope: AccessScopeDependency,
     service: CaseServiceDependency,
     status: CaseStatus | None = None,
     priority: CasePriority | None = None,
@@ -60,6 +72,7 @@ async def list_support_cases(
 ) -> SupportCasePage:
     """Return a filtered and stably ordered support-case page."""
     return await service.list_cases(
+        scope,
         CaseListQuery(
             status=status,
             priority=priority,
@@ -68,7 +81,7 @@ async def list_support_cases(
             order_id=order_id,
             limit=limit,
             offset=offset,
-        )
+        ),
     )
 
 
@@ -79,10 +92,11 @@ async def list_support_cases(
 )
 async def get_support_case(
     case_id: UUID,
+    scope: AccessScopeDependency,
     service: CaseServiceDependency,
 ) -> SupportCase:
     """Return one support case by its stable identifier."""
-    return await service.get_case(case_id)
+    return await service.get_case(scope, case_id)
 
 
 @router.get(
@@ -92,12 +106,14 @@ async def get_support_case(
 )
 async def list_support_case_events(
     case_id: UUID,
+    scope: AccessScopeDependency,
     service: CaseServiceDependency,
     limit: EventLimit = 100,
     offset: Offset = 0,
 ) -> SupportCaseEventPage:
     """Return one page of immutable support-case audit events."""
     return await service.list_case_events(
+        scope,
         case_id=case_id,
         limit=limit,
         offset=offset,
@@ -112,13 +128,34 @@ async def list_support_case_events(
 async def change_support_case_status(
     case_id: UUID,
     request: ChangeCaseStatusRequest,
+    scope: AccessScopeDependency,
     service: CaseServiceDependency,
 ) -> CaseServiceResult:
     """Apply one idempotent support-case status transition."""
     return await service.change_status(
+        scope,
         case_id=case_id,
         target_status=request.target_status,
         request_id=request.request_id,
-        actor=request.actor,
         on_hold_reason=request.on_hold_reason,
+    )
+
+
+@router.post(
+    "/{case_id}/assign",
+    response_model=CaseServiceResult,
+    responses=_COMMON_ERROR_RESPONSES,
+)
+async def assign_support_case(
+    case_id: UUID,
+    request: AssignCaseRequest,
+    scope: AccessScopeDependency,
+    service: CaseServiceDependency,
+) -> CaseServiceResult:
+    """Assign one support case to a support agent idempotently."""
+    return await service.assign_case(
+        scope,
+        case_id=case_id,
+        agent_id=request.agent_id,
+        request_id=request.request_id,
     )

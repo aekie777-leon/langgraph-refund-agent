@@ -4,11 +4,13 @@ import os
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, interrupt
 
+from agent.auth.context import require_scope
+from agent.refunds.runtime import get_refund_service
 from agent.state import RefundState
 from agent.tools.check_refund_policy import check_refund_policy
-from agent.tools.create_refund_request import create_refund_request
 
 
 async def check_refund_eligibility_node(
@@ -49,10 +51,29 @@ async def check_refund_eligibility_node(
     }
 
 
-async def create_refund_node(state: RefundState) -> dict[str, Any]:
+async def create_refund_node(
+    state: RefundState,
+    config: RunnableConfig,
+) -> dict[str, Any]:
     """Create the approved refund request in PostgreSQL."""
-    result = await create_refund_request.ainvoke({"order_id": state["order_id"]})
-    if not result["success"]:
+    order_id = state.get("order_id")
+    if not isinstance(order_id, str):
+        return {
+            "success": False,
+            "messages": [
+                AIMessage(
+                    content=(
+                        "The refund request could not be created automatically. "
+                        "Please contact customer service."
+                    )
+                )
+            ],
+        }
+    created = await get_refund_service().create_refund(
+        require_scope(config),
+        order_id=order_id,
+    )
+    if not created:
         return {
             "success": False,
             "messages": [

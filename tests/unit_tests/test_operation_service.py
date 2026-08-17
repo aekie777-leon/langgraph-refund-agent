@@ -9,30 +9,19 @@ import pytest
 from agent.operations.models import (
     CaseRecommendation,
     OperationDecision,
-    OrderOperation,
-    OrderOperationEvent,
     OrderOperationRequest,
     OrderSnapshot,
-)
-from agent.operations.repository import (
-    ActiveOrderOperationConflictError,
-    ConcurrentOperationUpdateError,
-    DuplicateOperationIdempotencyError,
-    DuplicateOperationSourceMessageError,
 )
 from agent.operations.service import (
     InvalidOperationStatusTransition,
     OperationService,
 )
+from tests.fakes.identity import make_scope
 from tests.fakes.operations import InMemoryOrderProvider
+from tests.operation_support import InMemoryOperationRepository
 
 NOW = datetime(2026, 8, 17, 8, 0, tzinfo=UTC)
-_ACTIVE_STATUSES = {
-    "pending_confirmation",
-    "submitted",
-    "processing",
-    "manual_review",
-}
+SCOPE = make_scope("customer")
 
 
 @pytest.fixture
@@ -40,94 +29,13 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-class _InMemoryOperationRepository:
-    """Implement the operation repository contract without PostgreSQL."""
-
-    def __init__(self) -> None:
-        self.operations: dict[UUID, OrderOperation] = {}
-        self.events: list[OrderOperationEvent] = []
-
-    async def get_operation(self, operation_id: UUID) -> OrderOperation | None:
-        return self.operations.get(operation_id)
-
-    async def find_by_source_message(
-        self,
-        *,
-        thread_id: str,
-        source_message_id: str,
-    ) -> OrderOperation | None:
-        return next(
-            (
-                operation
-                for operation in self.operations.values()
-                if operation.thread_id == thread_id
-                and operation.source_message_id == source_message_id
-            ),
-            None,
-        )
-
-    async def find_event_by_idempotency_key(
-        self,
-        idempotency_key: str,
-    ) -> OrderOperationEvent | None:
-        return next(
-            (event for event in self.events if event.idempotency_key == idempotency_key),
-            None,
-        )
-
-    async def find_active_by_order_id(self, order_id: str) -> OrderOperation | None:
-        return next(
-            (
-                operation
-                for operation in self.operations.values()
-                if operation.order_id == order_id and operation.status in _ACTIVE_STATUSES
-            ),
-            None,
-        )
-
-    async def create_operation_with_events(
-        self,
-        *,
-        operation: OrderOperation,
-        events: tuple[OrderOperationEvent, ...],
-    ) -> None:
-        if await self.find_by_source_message(
-            thread_id=operation.thread_id,
-            source_message_id=operation.source_message_id,
-        ):
-            raise DuplicateOperationSourceMessageError(operation.source_message_id)
-        if await self.find_active_by_order_id(operation.order_id):
-            raise ActiveOrderOperationConflictError(operation.order_id)
-        for event in events:
-            if await self.find_event_by_idempotency_key(event.idempotency_key):
-                raise DuplicateOperationIdempotencyError(event.idempotency_key)
-        self.operations[operation.operation_id] = operation
-        self.events.extend(events)
-
-    async def update_operation_with_events(
-        self,
-        *,
-        operation: OrderOperation,
-        events: tuple[OrderOperationEvent, ...],
-        expected_version: int,
-    ) -> None:
-        current = self.operations.get(operation.operation_id)
-        if current is None or current.version != expected_version:
-            raise ConcurrentOperationUpdateError(str(operation.operation_id))
-        for event in events:
-            if await self.find_event_by_idempotency_key(event.idempotency_key):
-                raise DuplicateOperationIdempotencyError(event.idempotency_key)
-        self.operations[operation.operation_id] = operation
-        self.events.extend(events)
+@pytest.fixture
+def repository() -> InMemoryOperationRepository:
+    return InMemoryOperationRepository()
 
 
 @pytest.fixture
-def repository() -> _InMemoryOperationRepository:
-    return _InMemoryOperationRepository()
-
-
-@pytest.fixture
-def service(repository: _InMemoryOperationRepository) -> OperationService:
+def service(repository: InMemoryOperationRepository) -> OperationService:
     counter = 0
 
     def id_factory() -> UUID:
@@ -152,6 +60,8 @@ def _snapshot(*, amount: str = "69.99") -> OrderSnapshot:
         delivered_at=datetime(2026, 8, 10, tzinfo=UTC),
         return_eligible=True,
         exchange_eligible=True,
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
     )
 
 
@@ -162,6 +72,8 @@ def _request(*, message_id: str = "message-1") -> OrderOperationRequest:
         order_id="ORD-10001",
         operation_type="return",
         reason="damaged_item",
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
     )
 
 
@@ -193,9 +105,10 @@ def _manual_decision() -> OperationDecision:
 @pytest.mark.anyio
 async def test_create_pending_operation_records_auditable_snapshot(
     service: OperationService,
-    repository: _InMemoryOperationRepository,
+    repository: InMemoryOperationRepository,
 ) -> None:
     result = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(),
         decision=_eligible_decision(),
@@ -208,22 +121,28 @@ async def test_create_pending_operation_records_auditable_snapshot(
     assert result.operation.amount == Decimal("69.99")
     assert result.operation.request_reason_code == "damaged_item"
     assert result.operation.policy_reason_codes == ("return_eligible",)
+    assert result.operation.customer_id == "customer-a"
+    assert result.operation.tenant_id == "tenant-demo"
+    assert result.operation.created_by == "tenant-demo:customer-a"
     assert result.events[0].event_type == "operation_created"
+    assert result.events[0].actor == "system"
     assert len(repository.operations) == 1
 
 
 @pytest.mark.anyio
 async def test_duplicate_source_message_does_not_create_a_second_operation(
     service: OperationService,
-    repository: _InMemoryOperationRepository,
+    repository: InMemoryOperationRepository,
 ) -> None:
     first = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(),
         decision=_eligible_decision(),
         request_excerpt="Return this item.",
     )
     duplicate = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(),
         decision=_eligible_decision(),
@@ -240,12 +159,14 @@ async def test_active_operation_blocks_a_second_source_message(
     service: OperationService,
 ) -> None:
     await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(),
         decision=_eligible_decision(),
         request_excerpt="Return this item.",
     )
     result = await service.create_pending_operation(
+        SCOPE,
         request=_request(message_id="message-2"),
         snapshot=_snapshot(),
         decision=_eligible_decision(),
@@ -259,9 +180,10 @@ async def test_active_operation_blocks_a_second_source_message(
 @pytest.mark.anyio
 async def test_automatic_operation_requires_provider_submission(
     service: OperationService,
-    repository: _InMemoryOperationRepository,
+    repository: InMemoryOperationRepository,
 ) -> None:
     created = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(),
         decision=_eligible_decision(),
@@ -270,9 +192,9 @@ async def test_automatic_operation_requires_provider_submission(
 
     with pytest.raises(ValueError, match="submit_confirmed_operation"):
         await service.confirm_operation(
+            SCOPE,
             operation_id=created.operation.operation_id,
             request_id="confirm-1",
-            actor="customer",
         )
 
     assert len(repository.events) == 1
@@ -283,6 +205,7 @@ async def test_manual_operation_confirmation_moves_to_manual_review(
     service: OperationService,
 ) -> None:
     created = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(amount="150.00"),
         decision=_manual_decision(),
@@ -290,9 +213,9 @@ async def test_manual_operation_confirmation_moves_to_manual_review(
     )
 
     result = await service.confirm_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="confirm-1",
-        actor="customer",
     )
 
     assert result.operation.status == "manual_review"
@@ -303,23 +226,24 @@ async def test_manual_operation_confirmation_moves_to_manual_review(
 @pytest.mark.anyio
 async def test_confirm_request_is_idempotent(
     service: OperationService,
-    repository: _InMemoryOperationRepository,
+    repository: InMemoryOperationRepository,
 ) -> None:
     created = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(amount="150.00"),
         decision=_manual_decision(),
         request_excerpt="Please return this expensive item.",
     )
     first = await service.confirm_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="confirm-1",
-        actor="customer",
     )
     duplicate = await service.confirm_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="confirm-1",
-        actor="customer",
     )
 
     assert first.action == "confirmed"
@@ -330,9 +254,10 @@ async def test_confirm_request_is_idempotent(
 @pytest.mark.anyio
 async def test_customer_can_cancel_only_before_confirmation(
     service: OperationService,
-    repository: _InMemoryOperationRepository,
+    repository: InMemoryOperationRepository,
 ) -> None:
     created = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(),
         decision=_eligible_decision(),
@@ -340,9 +265,9 @@ async def test_customer_can_cancel_only_before_confirmation(
     )
 
     result = await service.cancel_pending_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="cancel-1",
-        actor="customer",
     )
 
     assert result.action == "cancelled"
@@ -356,6 +281,7 @@ async def test_invalid_transition_after_confirmation_is_rejected(
     service: OperationService,
 ) -> None:
     created = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(),
         decision=_eligible_decision(),
@@ -363,17 +289,17 @@ async def test_invalid_transition_after_confirmation_is_rejected(
     )
     snapshot = _snapshot()
     await service.submit_confirmed_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="confirm-1",
-        actor="customer",
         provider=InMemoryOrderProvider(orders=(snapshot,)),
     )
 
     with pytest.raises(InvalidOperationStatusTransition):
         await service.cancel_pending_operation(
+            SCOPE,
             operation_id=created.operation.operation_id,
             request_id="cancel-1",
-            actor="customer",
         )
 
 
@@ -383,27 +309,32 @@ async def test_declined_operation_cannot_later_be_submitted(
 ) -> None:
     snapshot = _snapshot()
     created = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=snapshot,
         decision=_eligible_decision(),
         request_excerpt="Return this item.",
     )
     await service.cancel_pending_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="cancel-1",
-        actor="customer",
     )
     provider = InMemoryOrderProvider(orders=(snapshot,))
 
     with pytest.raises(InvalidOperationStatusTransition):
         await service.submit_confirmed_operation(
+            SCOPE,
             operation_id=created.operation.operation_id,
             request_id="submit-1",
-            actor="customer",
             provider=provider,
         )
 
-    provider_order = await provider.get_order(snapshot.order_id)
+    provider_order = await provider.get_order_for_customer(
+        order_id=snapshot.order_id,
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
+    )
     assert provider_order is not None
     assert provider_order.version == snapshot.version
 
@@ -413,23 +344,24 @@ async def test_manual_operation_can_link_exactly_one_support_case(
     service: OperationService,
 ) -> None:
     created = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(amount="150.00"),
         decision=_manual_decision(),
         request_excerpt="Please return this expensive item.",
     )
     await service.confirm_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="confirm-1",
-        actor="customer",
     )
     case_id = UUID("00000000-0000-0000-0000-000000000999")
 
     result = await service.attach_support_case(
+        SCOPE,
         operation_id=created.operation.operation_id,
         support_case_id=case_id,
         request_id="case-1",
-        actor="system",
     )
 
     assert result.action == "support_case_attached"
@@ -440,6 +372,7 @@ async def test_manual_operation_can_link_exactly_one_support_case(
 @pytest.mark.anyio
 async def test_update_status_records_provider_reference(service: OperationService) -> None:
     created = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=_snapshot(),
         decision=_eligible_decision(),
@@ -447,13 +380,14 @@ async def test_update_status_records_provider_reference(service: OperationServic
     )
     snapshot = _snapshot()
     await service.submit_confirmed_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="confirm-1",
-        actor="customer",
         provider=InMemoryOrderProvider(orders=(snapshot,)),
     )
 
     result = await service.update_operation_status(
+        SCOPE,
         operation_id=created.operation.operation_id,
         target_status="processing",
         request_id="provider-1",
@@ -469,10 +403,11 @@ async def test_update_status_records_provider_reference(service: OperationServic
 @pytest.mark.anyio
 async def test_confirmed_automatic_operation_submits_to_provider_once(
     service: OperationService,
-    repository: _InMemoryOperationRepository,
+    repository: InMemoryOperationRepository,
 ) -> None:
     snapshot = _snapshot()
     created = await service.create_pending_operation(
+        SCOPE,
         request=_request(),
         snapshot=snapshot,
         decision=_eligible_decision(),
@@ -481,15 +416,15 @@ async def test_confirmed_automatic_operation_submits_to_provider_once(
     provider = InMemoryOrderProvider(orders=(snapshot,))
 
     first = await service.submit_confirmed_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="submit-1",
-        actor="customer",
         provider=provider,
     )
     duplicate = await service.submit_confirmed_operation(
+        SCOPE,
         operation_id=created.operation.operation_id,
         request_id="submit-1",
-        actor="customer",
         provider=provider,
     )
 

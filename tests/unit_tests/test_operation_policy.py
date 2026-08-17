@@ -56,6 +56,8 @@ def _operation(
         "order_id": "ORD-10001",
         "operation_type": operation_type,
         "reason": reason or reasons[operation_type],
+        "customer_id": "customer-a",
+        "tenant_id": "tenant-demo",
     }
     if operation_type == "exchange":
         values["replacement_variant_id"] = "variant-blue"

@@ -10,6 +10,7 @@ from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from agent.auth.context import require_scope
 from agent.cases.models import CaseListQuery
 from agent.cases.runtime import get_case_service
 from agent.nodes.cases import require_thread_id
@@ -25,7 +26,11 @@ from agent.operations.policy import (
     evaluate_delivery_issue,
     evaluate_operation,
 )
-from agent.operations.provider import OrderProvider, StaleOrderVersionError
+from agent.operations.provider import (
+    OrderNotAccessibleError,
+    OrderProvider,
+    StaleOrderVersionError,
+)
 from agent.operations.runtime import get_operation_service, get_order_provider
 from agent.operations.service import OperationService
 from agent.prompts import OPERATION_REQUEST_EXTRACTION_SYSTEM_PROMPT
@@ -98,11 +103,25 @@ def build_operation_request_extractor_node(extractor: Any):
 def build_load_operation_snapshot_node(provider: OrderProvider):
     """Build a node that loads the current operation-policy snapshot."""
 
-    async def load_operation_snapshot(state: RefundState) -> dict[str, Any]:
+    async def load_operation_snapshot(
+        state: RefundState,
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
         order_id = state.get("order_id")
         if not isinstance(order_id, str):
             return {"operation_snapshot": {}, "operation_lookup_success": False}
-        snapshot = await provider.get_order(order_id)
+        scope = require_scope(config)
+        if scope.customer_id is None:
+            return {
+                "operation_snapshot": {},
+                "operation_lookup_success": False,
+                "messages": [AIMessage(content="Order not found. Please enter the correct order number.")],
+            }
+        snapshot = await provider.get_order_for_customer(
+            order_id=order_id,
+            customer_id=scope.customer_id,
+            tenant_id=scope.tenant_id,
+        )
         if snapshot is None:
             return {
                 "operation_snapshot": {},
@@ -159,6 +178,20 @@ def build_evaluate_operation_node(
             update["messages"] = [AIMessage(content=delivery_decision.display_reason)]
             return update
 
+        scope = require_scope(config)
+        if scope.customer_id is None:
+            return {
+                "operation_outcome": "rejected",
+                "operation_policy_reason_codes": ["order_not_found"],
+                "operation_display_reason": "Order not found.",
+                "messages": [
+                    AIMessage(
+                        content=(
+                            "Order not found. Please enter the correct order number."
+                        )
+                    )
+                ],
+            }
         operation_request = OrderOperationRequest(
             thread_id=thread_id,
             source_message_id=source_message_id,
@@ -166,12 +199,16 @@ def build_evaluate_operation_node(
             operation_type=cast(Any, extraction.operation_type),
             reason=cast(Any, extraction.reason),
             replacement_variant_id=extraction.replacement_variant_id,
+            customer_id=scope.customer_id,
+            tenant_id=scope.tenant_id,
         )
         availability = None
         if operation_request.operation_type == "exchange":
             assert operation_request.replacement_variant_id is not None
             availability = await provider.get_replacement_availability(
                 order_id=operation_request.order_id,
+                customer_id=operation_request.customer_id,
+                tenant_id=operation_request.tenant_id,
                 replacement_variant_id=operation_request.replacement_variant_id,
             )
         decision = evaluate_operation(
@@ -183,6 +220,7 @@ def build_evaluate_operation_node(
         )
         return await _persist_or_respond(
             state=state,
+            config=config,
             service=service,
             request=operation_request,
             snapshot=snapshot,
@@ -196,6 +234,7 @@ def build_evaluate_operation_node(
 async def _persist_or_respond(
     *,
     state: RefundState,
+    config: RunnableConfig,
     service: OperationService,
     request: OrderOperationRequest,
     snapshot: OrderSnapshot,
@@ -211,6 +250,7 @@ async def _persist_or_respond(
     if decision.outcome not in ("eligible", "manual_review"):
         return {**base, "messages": [AIMessage(content=decision.display_reason)]}
     result = await service.create_pending_operation(
+        require_scope(config),
         request=request,
         snapshot=snapshot,
         decision=decision,
@@ -267,17 +307,21 @@ def build_submit_confirmed_operation_node(
 ):
     """Build the automatic provider-submission node."""
 
-    async def submit_confirmed_operation(state: RefundState) -> dict[str, Any]:
+    async def submit_confirmed_operation(
+        state: RefundState,
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
         operation_id = _operation_id(state)
         try:
             result = await service.submit_confirmed_operation(
+                require_scope(config),
                 operation_id=operation_id,
                 request_id=f"graph-submit:{operation_id}",
-                actor="customer",
                 provider=provider,
             )
-        except StaleOrderVersionError:
+        except (StaleOrderVersionError, OrderNotAccessibleError):
             result = await service.update_operation_status(
+                require_scope(config),
                 operation_id=operation_id,
                 target_status="rejected",
                 request_id=f"graph-stale:{operation_id}",
@@ -301,12 +345,15 @@ def build_submit_confirmed_operation_node(
 def build_confirm_manual_operation_node(service: OperationService):
     """Build the node that records a confirmed manual-review request."""
 
-    async def confirm_manual_operation(state: RefundState) -> dict[str, Any]:
+    async def confirm_manual_operation(
+        state: RefundState,
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
         operation_id = _operation_id(state)
         result = await service.confirm_operation(
+            require_scope(config),
             operation_id=operation_id,
             request_id=f"graph-manual:{operation_id}",
-            actor="customer",
         )
         return {
             "operation_status": result.operation.status,
@@ -321,12 +368,15 @@ def build_confirm_manual_operation_node(service: OperationService):
 def build_cancel_operation_node(service: OperationService):
     """Build the node that records customer cancellation of a pending operation."""
 
-    async def cancel_operation(state: RefundState) -> dict[str, Any]:
+    async def cancel_operation(
+        state: RefundState,
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
         operation_id = _operation_id(state)
         result = await service.cancel_pending_operation(
+            require_scope(config),
             operation_id=operation_id,
             request_id=f"graph-cancel:{operation_id}",
-            actor="customer",
         )
         return {
             "operation_status": result.operation.status,
@@ -357,7 +407,10 @@ def cancel_delivery_investigation_node(_state: RefundState) -> dict[str, Any]:
 def build_attach_operation_case_node(service: OperationService):
     """Build a final node that links a newly persisted case to an operation."""
 
-    async def attach_operation_case(state: RefundState) -> dict[str, Any]:
+    async def attach_operation_case(
+        state: RefundState,
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
         operation_id = state.get("operation_id")
         case_id = state.get("support_case_id")
         if (
@@ -367,10 +420,10 @@ def build_attach_operation_case_node(service: OperationService):
         ):
             return {}
         result = await service.attach_support_case(
+            require_scope(config),
             operation_id=UUID(operation_id),
             support_case_id=UUID(case_id),
             request_id=f"graph-case:{operation_id}:{case_id}",
-            actor="system",
         )
         return {"operation_service_action": result.action}
 
@@ -391,7 +444,10 @@ def build_support_case_status_node(service_provider=get_case_service):
                     )
                 ]
             }
-        page = await service_provider().list_cases(CaseListQuery(thread_id=thread_id))
+        page = await service_provider().list_cases(
+            require_scope(config),
+            CaseListQuery(thread_id=thread_id),
+        )
         if not page.items:
             return {"messages": [AIMessage(content="There are no support cases for this conversation.")]}
         lines = ["Support cases for this conversation:"]
