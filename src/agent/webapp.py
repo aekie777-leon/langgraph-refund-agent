@@ -43,7 +43,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="OpsPilot Internal API",
-    version="0.5.0",
+    version="0.5.1",
     lifespan=lifespan,
 )
 app.include_router(support_case_router)

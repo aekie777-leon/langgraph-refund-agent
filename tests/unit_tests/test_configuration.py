@@ -10,6 +10,7 @@ from agent import graph as graph_module
 from agent import models
 from agent.schemas import (
     FormalComplaintDetection,
+    OperationRequestExtraction,
     OrderDetection,
     Route,
     SemanticRiskDetection,
@@ -57,6 +58,17 @@ class FakeRiskClassifier:
         )
 
 
+class FakeOperationRequestExtractor:
+    """Return a fixed operation extraction without calling an API."""
+
+    async def ainvoke(self, _messages):
+        return OperationRequestExtraction(
+            operation_type="return",
+            reason="changed_mind",
+            ambiguous=False,
+        )
+
+
 def test_build_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         models,
@@ -73,6 +85,11 @@ def test_build_graph(monkeypatch: pytest.MonkeyPatch) -> None:
         models,
         "get_risk_classifier",
         lambda: FakeRiskClassifier(),
+    )
+    monkeypatch.setattr(
+        models,
+        "get_operation_request_extractor",
+        lambda: FakeOperationRequestExtractor(),
     )
 
     graph = graph_module.build_graph()
@@ -97,6 +114,7 @@ def test_build_graph(monkeypatch: pytest.MonkeyPatch) -> None:
         "handle_noncritical_risk",
         "handle_critical_risk",
         "finalize_case_handoff",
+        "operation_subflow",
     }.issubset(graph.get_graph().nodes)
 
 
@@ -118,6 +136,11 @@ def test_agent_server_factory_accepts_runnable_config(
         models,
         "get_risk_classifier",
         lambda: FakeRiskClassifier(),
+    )
+    monkeypatch.setattr(
+        models,
+        "get_operation_request_extractor",
+        lambda: FakeOperationRequestExtractor(),
     )
 
     graph = graph_module.create_graph(

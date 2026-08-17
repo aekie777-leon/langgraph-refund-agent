@@ -19,6 +19,7 @@ from agent.operations.models import (
 )
 from agent.operations.postgres_repository import PostgresOrderOperationRepository
 from agent.operations.service import OperationService
+from tests.fakes.operations import InMemoryOrderProvider
 
 pytestmark = [pytest.mark.anyio, pytest.mark.postgres]
 NOW = datetime(2026, 8, 17, 8, 0, tzinfo=UTC)
@@ -99,6 +100,7 @@ async def test_operation_round_trips_and_confirmation_is_idempotent(
     pool, thread_id = postgres_context
     repository = PostgresOrderOperationRepository(pool)
     service = OperationService(repository, clock=lambda: NOW)
+    provider = InMemoryOrderProvider(orders=(_snapshot(),))
     request = OrderOperationRequest(
         thread_id=thread_id,
         source_message_id="message-1",
@@ -113,15 +115,17 @@ async def test_operation_round_trips_and_confirmation_is_idempotent(
         decision=_decision(),
         request_excerpt="Please return the damaged item.",
     )
-    confirmed = await service.confirm_operation(
+    confirmed = await service.submit_confirmed_operation(
         operation_id=created.operation.operation_id,
         request_id="confirm-1",
         actor="customer",
+        provider=provider,
     )
-    duplicate = await service.confirm_operation(
+    duplicate = await service.submit_confirmed_operation(
         operation_id=created.operation.operation_id,
         request_id="confirm-1",
         actor="customer",
+        provider=provider,
     )
 
     stored = await repository.get_operation(created.operation.operation_id)

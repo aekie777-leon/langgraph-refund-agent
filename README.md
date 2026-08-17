@@ -2,7 +2,13 @@
 
 A small, risk-aware customer-service assistant built with LangGraph. It classifies order operations, refund requests, order inquiries, delivery issues, and complaints; performs deterministic and semantic risk checks; keeps business eligibility decisions deterministic; asks for confirmation before state-changing operations; and stores order operations, refund requests, support cases, and immutable events in PostgreSQL.
 
-Version: `0.5.0`
+Version: `0.5.1`
+
+## What's new in v0.5.1
+
+- Keeps Graph-construction tests fully isolated from model credentials by using an operation-extraction fake
+- Aligns the PostgreSQL automatic-operation integration test with the v0.5 Provider submission boundary
+- Verifies the same CI suite on Python 3.11 and Python 3.12 without changing customer-facing behavior
 
 ## What's new in v0.5.0
 
@@ -449,7 +455,13 @@ Released under the MIT License. See `LICENSE`.
 
 这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别订单操作、退款申请、订单查询、物流问题和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断业务资格，在会改变状态的操作前请求用户确认，并把订单操作、退款申请、人工工单和不可变事件保存到 PostgreSQL。
 
-版本：`0.5.0`
+版本：`0.5.1`
+
+## v0.5.1 新增内容
+
+- 使用订单操作提取 fake，让 Graph 构建测试完全不依赖模型密钥；
+- 让 PostgreSQL 自动操作集成测试与 v0.5 Provider 提交边界保持一致；
+- 在不改变客户侧业务行为的前提下，验证 Python 3.11 和 Python 3.12 使用同一套 CI 测试。
 
 ## v0.5.0 新增内容
 
