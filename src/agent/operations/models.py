@@ -26,6 +26,7 @@ OperationStatus = Literal[
 ]
 OperationRecordStatus = Literal[
     "pending_confirmation",
+    "queued",
     "submitted",
     "processing",
     "manual_review",
@@ -43,6 +44,7 @@ OperationServiceAction = Literal[
     "created",
     "duplicate_ignored",
     "confirmed",
+    "queued",
     "submitted",
     "cancelled",
     "status_changed",

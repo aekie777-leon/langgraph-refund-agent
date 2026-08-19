@@ -10,6 +10,8 @@ from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from agent.auth.models import AccessScope
 from agent.auth.visibility import customer_owned_visibility
+from agent.integrations.models import ProviderCommandEnvelope
+from agent.integrations.postgres_writes import insert_outbox_message
 from agent.operations.models import OrderOperation, OrderOperationEvent
 from agent.operations.repository import (
     ActiveOrderOperationConflictError,
@@ -18,6 +20,7 @@ from agent.operations.repository import (
     DuplicateOperationSourceMessageError,
     OperationPersistenceError,
     OperationRepository,
+    validate_operation_command_association,
 )
 
 _ACTIVE_OPERATION_CONSTRAINT = "uq_order_operations_active_order"
@@ -207,7 +210,7 @@ class PostgresOrderOperationRepository(OperationRepository):
             SELECT {_OPERATION_COLUMNS}
             FROM case_management.order_operations
             WHERE order_id = %s
-              AND status IN ('pending_confirmation', 'submitted', 'processing', 'manual_review')
+              AND status IN ('pending_confirmation', 'queued', 'submitted', 'processing', 'manual_review')
               AND {visibility}
             ORDER BY created_at, operation_id
             LIMIT 1
@@ -286,6 +289,83 @@ class PostgresOrderOperationRepository(OperationRepository):
             events=events,
             expect_update=True,
         )
+
+    async def queue_operation_with_events_and_command(
+        self,
+        scope: AccessScope,
+        *,
+        operation: OrderOperation,
+        events: tuple[OrderOperationEvent, ...],
+        command: ProviderCommandEnvelope,
+        expected_version: int,
+    ) -> None:
+        """Atomically queue the operation, append events, and enqueue the command."""
+        validate_operation_command_association(
+            operation=operation,
+            events=events,
+            command=command,
+            expected_version=expected_version,
+        )
+        _validate_operation_ownership(scope, operation)
+        for event in events:
+            _validate_event_ownership(scope, event)
+        visibility, visibility_params = customer_owned_visibility(scope)
+        operation_sql = f"""
+            UPDATE case_management.order_operations
+            SET policy_reason_codes = %s, display_reason = %s,
+                review_case_type = %s, review_priority = %s,
+                support_case_id = %s, provider_reference = %s, status = %s,
+                updated_at = %s, version = %s
+            WHERE operation_id = %s AND version = %s AND {visibility}
+        """
+        values = (
+            list(operation.policy_reason_codes),
+            operation.display_reason,
+            operation.review_case_type,
+            operation.review_priority,
+            operation.support_case_id,
+            operation.provider_reference,
+            operation.status,
+            operation.updated_at,
+            operation.version,
+            operation.operation_id,
+            expected_version,
+            *visibility_params,
+        )
+        event_sql = f"""
+            INSERT INTO case_management.order_operation_events ({_EVENT_COLUMNS})
+            VALUES ({', '.join(['%s'] * 12)})
+        """
+        try:
+            async with self._pool.connection() as connection:
+                async with connection.transaction():
+                    async with connection.cursor() as cursor:
+                        await cursor.execute(operation_sql, values)
+                        if cursor.rowcount != 1:
+                            raise ConcurrentOperationUpdateError(
+                                "Operation version changed"
+                            )
+                        for event in events:
+                            await cursor.execute(event_sql, _event_values(event))
+                        await insert_outbox_message(
+                            cursor,
+                            command=command,
+                            status="pending",
+                            available_at=operation.updated_at,
+                            now=operation.updated_at,
+                        )
+        except ConcurrentOperationUpdateError:
+            raise
+        except errors.UniqueViolation as error:
+            _raise_unique_violation(error)
+        except errors.DatabaseError as error:
+            raise OperationPersistenceError(
+                "Could not queue order operation"
+            ) from error
+        except PoolTimeout as error:
+            raise OperationPersistenceError(
+                "Timed out acquiring PostgreSQL connection"
+            ) from error
 
     async def _fetch_operation(
         self,

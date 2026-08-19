@@ -26,9 +26,13 @@ from agent.cases.repository import (
     ConcurrentCaseUpdateError,
     DuplicateIdempotencyKeyError,
     DuplicateSourceMessageError,
+    validate_case_command_association,
 )
+from agent.integrations.models import ProviderCommandEnvelope
+from agent.integrations.postgres_writes import insert_outbox_message
 
 _ACTIVE_CASE_CONSTRAINT = "uq_support_cases_active_thread_type"
+_ACTIVE_DELIVERY_CONSTRAINT = "uq_support_cases_active_delivery_order"
 _EVENT_IDEMPOTENCY_CONSTRAINT = "uq_support_case_events_idempotency"
 
 _CASE_COLUMNS = """
@@ -72,6 +76,9 @@ _EVENT_COLUMNS = """
     on_hold_reason,
     previous_assigned_agent_id,
     current_assigned_agent_id,
+    provider_command_id,
+    provider_command_status,
+    provider_reference,
     actor,
     customer_id,
     tenant_id,
@@ -85,7 +92,7 @@ _INSERT_CASE = f"""
 
 _INSERT_EVENT = f"""
     INSERT INTO case_management.support_case_events ({_EVENT_COLUMNS})
-    VALUES ({', '.join(['%s'] * 21)})
+    VALUES ({', '.join(['%s'] * 24)})
 """
 
 
@@ -145,6 +152,9 @@ def _event_values(event: SupportCaseEvent) -> tuple[Any, ...]:
         event.on_hold_reason,
         event.previous_assigned_agent_id,
         event.current_assigned_agent_id,
+        event.provider_command_id,
+        event.provider_command_status,
+        event.provider_reference,
         event.actor,
         event.customer_id,
         event.tenant_id,
@@ -158,7 +168,7 @@ def _raise_unique_violation(
 ) -> NoReturn:
     """Translate named PostgreSQL constraints into repository exceptions."""
     constraint = error.diag.constraint_name
-    if constraint == _ACTIVE_CASE_CONSTRAINT:
+    if constraint in (_ACTIVE_CASE_CONSTRAINT, _ACTIVE_DELIVERY_CONSTRAINT):
         raise ActiveCaseConflictError(str(event.case_id)) from error
     if constraint == _EVENT_IDEMPOTENCY_CONSTRAINT:
         if event.source_message_id is not None:
@@ -263,9 +273,32 @@ class PostgresCaseRepository(CaseRepository):
         *,
         thread_id: str,
         case_type: CaseType,
+        order_id: str | None = None,
     ) -> SupportCase | None:
-        """Find an unresolved case with the same thread and type."""
+        """Find an unresolved case for the thread, type, and delivery order.
+
+        Delivery-investigation cases are isolated per order.
+        """
         visibility, parameters = case_visibility(scope)
+        if case_type == "delivery_investigation":
+            if order_id is None:
+                raise ValueError(
+                    "delivery_investigation lookup requires an order_id"
+                )
+            query = f"""
+                SELECT {_CASE_COLUMNS}
+                FROM case_management.support_cases
+                WHERE thread_id = %s
+                  AND case_type = %s
+                  AND order_id = %s
+                  AND status IN ('open', 'in_progress', 'on_hold')
+                  AND {visibility}
+                ORDER BY created_at, case_id
+                LIMIT 1
+            """
+            return await self._fetch_case(
+                query, (thread_id, case_type, order_id, *parameters)
+            )
         query = f"""
             SELECT {_CASE_COLUMNS}
             FROM case_management.support_cases
@@ -451,6 +484,171 @@ class PostgresCaseRepository(CaseRepository):
             raise
         except (psycopg.Error, PoolTimeout) as error:
             raise CasePersistenceError("Failed to update support case") from error
+
+    async def create_case_with_event_and_command(
+        self,
+        scope: AccessScope,
+        *,
+        case: SupportCase,
+        event: SupportCaseEvent,
+        command: ProviderCommandEnvelope,
+    ) -> None:
+        """Atomically create a case, its first event, and the outbox command."""
+        validate_case_command_association(case=case, event=event, command=command)
+        _validate_case_ownership(scope, case)
+        _validate_event_ownership(scope, event)
+        try:
+            async with self._pool.connection() as connection:
+                async with connection.transaction():
+                    await connection.execute(_INSERT_CASE, _case_values(case))
+                    await connection.execute(_INSERT_EVENT, _event_values(event))
+                    await insert_outbox_message(
+                        connection,
+                        command=command,
+                        status="pending",
+                        available_at=case.updated_at,
+                        now=case.updated_at,
+                    )
+        except errors.UniqueViolation as error:
+            _raise_unique_violation(error, event)
+        except (psycopg.Error, PoolTimeout) as error:
+            raise CasePersistenceError(
+                "Failed to create support case with command"
+            ) from error
+
+    async def update_case_with_event_and_command(
+        self,
+        scope: AccessScope,
+        *,
+        case: SupportCase,
+        event: SupportCaseEvent,
+        command: ProviderCommandEnvelope,
+        expected_version: int,
+    ) -> None:
+        """Atomically update a case, append an event, and enqueue the command."""
+        if case.version != expected_version + 1:
+            raise ValueError("case.version must equal expected_version + 1")
+        validate_case_command_association(case=case, event=event, command=command)
+        _validate_case_ownership(scope, case)
+        _validate_event_ownership(scope, event)
+
+        visibility, visibility_params = case_visibility(scope)
+        update_sql = f"""
+            UPDATE case_management.support_cases
+            SET
+                order_id = %s,
+                priority = %s,
+                status = %s,
+                risk_level = %s,
+                risk_categories = %s,
+                reason_codes = %s,
+                display_reason = %s,
+                on_hold_reason = %s,
+                assigned_agent_id = %s,
+                updated_at = %s,
+                version = %s
+            WHERE case_id = %s AND version = %s AND {visibility}
+        """
+        values = (
+            case.order_id,
+            case.priority,
+            case.status,
+            case.risk_level,
+            list(case.risk_categories),
+            list(case.reason_codes),
+            case.display_reason,
+            case.on_hold_reason,
+            case.assigned_agent_id,
+            case.updated_at,
+            case.version,
+            case.case_id,
+            expected_version,
+            *visibility_params,
+        )
+
+        try:
+            async with self._pool.connection() as connection:
+                async with connection.transaction():
+                    result = await connection.execute(update_sql, values)
+                    if result.rowcount != 1:
+                        raise ConcurrentCaseUpdateError(str(case.case_id))
+                    await connection.execute(_INSERT_EVENT, _event_values(event))
+                    await insert_outbox_message(
+                        connection,
+                        command=command,
+                        status="pending",
+                        available_at=case.updated_at,
+                        now=case.updated_at,
+                    )
+        except errors.UniqueViolation as error:
+            _raise_unique_violation(error, event)
+        except ConcurrentCaseUpdateError:
+            raise
+        except (psycopg.Error, PoolTimeout) as error:
+            raise CasePersistenceError(
+                "Failed to update support case with command"
+            ) from error
+
+    async def append_delivery_trigger_and_ensure_command(
+        self,
+        scope: AccessScope,
+        *,
+        case: SupportCase,
+        event: SupportCaseEvent,
+        command: ProviderCommandEnvelope,
+        expected_version: int,
+    ) -> bool:
+        """Atomically append a trigger and repair a historical missing command."""
+        if case.version != expected_version + 1:
+            raise ValueError("case.version must equal expected_version + 1")
+        validate_case_command_association(case=case, event=event, command=command)
+        _validate_case_ownership(scope, case)
+        _validate_event_ownership(scope, event)
+        visibility, visibility_params = case_visibility(scope)
+        update_sql = f"""
+            UPDATE case_management.support_cases
+            SET order_id = %s, priority = %s, status = %s, risk_level = %s,
+                risk_categories = %s, reason_codes = %s, display_reason = %s,
+                on_hold_reason = %s, assigned_agent_id = %s, updated_at = %s, version = %s
+            WHERE case_id = %s AND version = %s AND {visibility}
+        """
+        values = (
+            case.order_id, case.priority, case.status, case.risk_level,
+            list(case.risk_categories), list(case.reason_codes), case.display_reason,
+            case.on_hold_reason, case.assigned_agent_id, case.updated_at, case.version,
+            case.case_id, expected_version, *visibility_params,
+        )
+        try:
+            async with self._pool.connection() as connection:
+                async with connection.transaction():
+                    async with connection.cursor() as cursor:
+                        await cursor.execute(update_sql, values)
+                        if cursor.rowcount != 1:
+                            raise ConcurrentCaseUpdateError(str(case.case_id))
+                        await cursor.execute(_INSERT_EVENT, _event_values(event))
+                        await cursor.execute(
+                            """
+                            SELECT 1 FROM integration.outbox_messages
+                            WHERE aggregate_type = 'support_case' AND aggregate_id = %s
+                            FOR KEY SHARE
+                            """,
+                            (case.case_id,),
+                        )
+                        has_command = await cursor.fetchone() is not None
+                        if not has_command:
+                            await insert_outbox_message(
+                                cursor, command=command, status="pending",
+                                available_at=case.updated_at, now=case.updated_at,
+                            )
+                        return not has_command
+        except errors.UniqueViolation as error:
+            _raise_unique_violation(error, event)
+        except ConcurrentCaseUpdateError:
+            raise
+        except (psycopg.Error, PoolTimeout) as error:
+            raise CasePersistenceError(
+                "Failed to append delivery trigger and ensure command"
+            ) from error
 
     async def _fetch_case(
         self,

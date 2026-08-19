@@ -2,7 +2,25 @@
 
 A small, risk-aware customer-service assistant built with LangGraph. It classifies order operations, refund requests, order inquiries, delivery issues, and complaints; performs deterministic and semantic risk checks; keeps business eligibility decisions deterministic; asks for confirmation before state-changing operations; and stores order operations, refund requests, support cases, and immutable events in PostgreSQL.
 
-Version: `0.6.0`
+Version: `0.7.0`
+
+## What's new in v0.7.0
+
+- Adds a versioned Provider command contract with canonical envelopes,
+  deterministic signing, connection resolution, retry classification, and
+  strict tenant and aggregate associations
+- Persists transactional Outbox and Inbox messages, processing attempts, lease
+  ownership, retry schedules, and immutable audit events in PostgreSQL
+- Dispatches outbound Provider commands asynchronously through a standalone
+  Outbox worker with rate limits, lease renewal, recovery, and safe failure
+  coordination
+- Receives authenticated HMAC callbacks through a size-limited FastAPI webhook
+  boundary with replay-safe Inbox persistence and conflict detection
+- Applies callbacks atomically through fenced Order Operation and Support Case
+  finalizers, including duplicate, stale, retry, exhaustion, rollback, and
+  concurrency behavior
+- Runs separate Outbox and Inbox worker services in Docker Compose, keeping
+  Provider credentials isolated from the inbound worker and LangGraph workflow
 
 ## What's new in v0.6.0
 
@@ -256,7 +274,7 @@ On PowerShell:
 Copy-Item .env.example .env
 ```
 
-Fill in at least `OPENAI_API_KEY`, `OPENAI_MODEL`, and the PostgreSQL settings. `OPENAI_BASE_URL` can remain empty when the official OpenAI API is used. `CUSTOMER_SERVICE_CONTACT` optionally controls the contact text shown for manual review.
+Fill in at least `OPENAI_API_KEY`, `OPENAI_MODEL`, and the PostgreSQL settings. `OPENAI_BASE_URL` can remain empty when the official OpenAI API is used. `CUSTOMER_SERVICE_CONTACT` optionally controls the contact text shown for manual review. For the v0.7 asynchronous Provider flow, also configure `PROVIDER_CONNECTIONS_JSON` for outbound commands and `PROVIDER_WEBHOOK_CONNECTIONS_JSON` for inbound HMAC trust; the two credential sets are deliberately separate.
 
 You may configure PostgreSQL with one connection string:
 
@@ -302,9 +320,29 @@ Every request must then send `Authorization: Bearer demo-customer-token`.
 
 The graph entry point is configured in `langgraph.json` as `agent.graph:create_graph` through the source file path.
 
+The Provider workers are separate processes and do not run inside LangGraph or
+FastAPI. After applying migrations, start them in separate terminals when
+testing the asynchronous v0.7 flow:
+
+```bash
+uv run python -m agent.integrations.worker_main
+uv run python -m agent.integrations.inbox_worker_main
+```
+
+The API receives signed callbacks at
+`POST /webhooks/providers/{provider_connection_id}` and only persists a
+verified Inbox message. The Inbox worker performs the later domain update.
+See [`docs/v0.7_step4_webhook_inbox.md`](docs/v0.7_step4_webhook_inbox.md) for
+the signing contract, error boundary, finalization rules, and operational
+limits.
+
 ### Run with Docker Compose
 
-Docker Compose starts the Agent Server together with PostgreSQL and Redis. Copy `.env.example` to `.env`, then set `OPENAI_API_KEY`, `OPENAI_MODEL`, `LANGSMITH_API_KEY`, and a URL-safe `POSTGRES_PASSWORD`.
+Docker Compose starts the Agent Server, PostgreSQL, Redis, and the separate
+Outbox and Inbox workers. Copy `.env.example` to `.env`, then set
+`OPENAI_API_KEY`, `OPENAI_MODEL`, `LANGSMITH_API_KEY`, a URL-safe
+`POSTGRES_PASSWORD`, and `PROVIDER_CONNECTIONS_JSON`. Configure
+`PROVIDER_WEBHOOK_CONNECTIONS_JSON` before accepting Provider callbacks.
 
 ```bash
 docker compose up --build -d
@@ -318,7 +356,7 @@ The API is available at `http://127.0.0.1:8000`. Check it with:
 curl http://127.0.0.1:8000/ok
 ```
 
-Compose supplies `DATABASE_URI`, `POSTGRES_URI`, and `REDIS_URI` inside the API container. The one-shot `case-migrations` service applies pending migrations before `langgraph-api` starts, including when the `postgres-data` volume already exists. Migration failure prevents the API from starting.
+Compose supplies `DATABASE_URI`, `POSTGRES_URI`, and `REDIS_URI` inside the API container. The one-shot `case-migrations` service applies pending migrations before `langgraph-api` and both workers start, including when the `postgres-data` volume already exists. Migration failure prevents all three application processes from starting. The workers expose no ports: `outbox-worker` receives only its database and outbound Provider configuration, while `inbox-worker` receives only its database URI and worker ID.
 
 Stop the services without deleting database data:
 
@@ -513,7 +551,22 @@ Released under the MIT License. See `LICENSE`.
 
 这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别订单操作、退款申请、订单查询、物流问题和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断业务资格，在会改变状态的操作前请求用户确认，并把订单操作、退款申请、人工工单和不可变事件保存到 PostgreSQL。
 
-版本：`0.6.0`
+版本：`0.7.0`
+
+## v0.7.0 新增内容
+
+- 新增版本化 Provider 命令契约，包括 canonical envelope、确定性签名、
+  连接解析、重试分类，以及严格的租户与聚合关联校验；
+- 在 PostgreSQL 中事务性持久化 Outbox、Inbox、处理 Attempt、lease 归属、
+  重试时间与不可变审计事件；
+- 通过独立 Outbox Worker 异步分发 Provider 命令，并实现限流、lease 续租、
+  过期恢复与安全失败协调；
+- 通过受请求大小限制的 FastAPI Webhook 边界接收 HMAC 验签回调，并提供
+  replay-safe Inbox 持久化与冲突检测；
+- 使用带 fencing 的订单操作与工单 Finalizer 原子应用回调，覆盖重复、过期、
+  重试耗尽、事务回滚与并发场景；
+- 在 Docker Compose 中独立运行 Outbox / Inbox Worker，使出站 Provider 凭据
+  与入站 Worker、LangGraph workflow 保持隔离。
 
 ## v0.6.0 新增内容
 
@@ -754,7 +807,7 @@ uv sync --extra dev
 Copy-Item .env.example .env
 ```
 
-至少填写 `OPENAI_API_KEY`、`OPENAI_MODEL` 和 PostgreSQL 配置。使用 OpenAI 官方接口时，`OPENAI_BASE_URL` 可以留空。`CUSTOMER_SERVICE_CONTACT` 可以用来设置转人工审核时显示的联系方式。
+至少填写 `OPENAI_API_KEY`、`OPENAI_MODEL` 和 PostgreSQL 配置。使用 OpenAI 官方接口时，`OPENAI_BASE_URL` 可以留空。`CUSTOMER_SERVICE_CONTACT` 可以用来设置转人工审核时显示的联系方式。使用 v0.7 异步 Provider 流程时，还应分别配置出站命令使用的 `PROVIDER_CONNECTIONS_JSON` 与入站 HMAC 信任使用的 `PROVIDER_WEBHOOK_CONNECTIONS_JSON`；两套凭据有意隔离。
 
 可以直接设置完整的 PostgreSQL 连接地址：
 
@@ -796,9 +849,26 @@ DEMO_IDENTITY_TOKENS={"demo-customer-token":{"user_id":"customer-a","tenant_id":
 
 图入口已在 `langgraph.json` 中配置。
 
+Provider Worker 是独立进程，不会在 LangGraph 或 FastAPI 内启动。应用迁移后，
+可在不同终端启动 v0.7 异步流程：
+
+```bash
+uv run python -m agent.integrations.worker_main
+uv run python -m agent.integrations.inbox_worker_main
+```
+
+API 通过 `POST /webhooks/providers/{provider_connection_id}` 接收签名回调，
+请求阶段只持久化验签后的 Inbox；后续领域更新由 Inbox Worker 完成。签名契约、
+错误边界、收尾规则与运行限制见
+[`docs/v0.7_step4_webhook_inbox.md`](docs/v0.7_step4_webhook_inbox.md)。
+
 ### 使用 Docker Compose 运行
 
-Docker Compose 会同时启动 Agent Server、PostgreSQL 和 Redis。先将 `.env.example` 复制为 `.env`，然后填写 `OPENAI_API_KEY`、`OPENAI_MODEL`、`LANGSMITH_API_KEY` 和一个适合放入 URL 的 `POSTGRES_PASSWORD`。
+Docker Compose 会同时启动 Agent Server、PostgreSQL、Redis，以及独立的
+Outbox / Inbox Worker。先将 `.env.example` 复制为 `.env`，然后填写
+`OPENAI_API_KEY`、`OPENAI_MODEL`、`LANGSMITH_API_KEY`、适合放入 URL 的
+`POSTGRES_PASSWORD` 和 `PROVIDER_CONNECTIONS_JSON`；接收 Provider 回调前还需
+配置 `PROVIDER_WEBHOOK_CONNECTIONS_JSON`。
 
 ```bash
 docker compose up --build -d
@@ -812,7 +882,7 @@ API 地址为 `http://127.0.0.1:8000`，可以执行以下命令检查：
 curl http://127.0.0.1:8000/ok
 ```
 
-Compose 会自动为 API 容器设置 `DATABASE_URI`、`POSTGRES_URI` 和 `REDIS_URI`。一次性的 `case-migrations` 服务会在 `langgraph-api` 启动前应用待执行迁移，即使 `postgres-data` 数据卷已经存在也会运行。迁移失败时 API 不会启动。
+Compose 会自动为 API 容器设置 `DATABASE_URI`、`POSTGRES_URI` 和 `REDIS_URI`。一次性的 `case-migrations` 服务会在 `langgraph-api` 和两个 Worker 启动前应用待执行迁移，即使 `postgres-data` 数据卷已经存在也会运行。迁移失败时三个应用进程都不会启动。两个 Worker 都不暴露端口：`outbox-worker` 仅接收数据库与出站 Provider 配置，`inbox-worker` 仅接收数据库 URI 和 Worker ID。
 
 停止服务但保留数据库数据：
 

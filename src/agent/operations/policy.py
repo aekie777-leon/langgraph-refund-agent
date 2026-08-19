@@ -20,7 +20,7 @@ from agent.operations.models import (
 RETURN_WINDOW_DAYS = 7
 TRACKING_STALLED_HOURS = 72
 _ACTIVE_OPERATION_STATUSES = frozenset(
-    {"submitted", "processing", "manual_review", "completed"}
+    {"queued", "submitted", "processing", "manual_review", "completed"}
 )
 
 

@@ -12,6 +12,7 @@ from agent.operations.models import (
     OrderOperationRequest,
     OrderSnapshot,
 )
+from agent.operations.repository import OperationPersistenceError
 from agent.operations.service import (
     InvalidOperationStatusTransition,
     OperationService,
@@ -249,6 +250,60 @@ async def test_confirm_request_is_idempotent(
     assert first.action == "confirmed"
     assert duplicate.action == "status_unchanged"
     assert len(repository.events) == 3
+
+
+@pytest.mark.anyio
+async def test_provider_failure_rejects_blank_request_id_before_coordinator() -> None:
+    service = OperationService(InMemoryOperationRepository())
+
+    with pytest.raises(ValueError, match="request_id"):
+        await service.move_to_provider_manual_review(
+            SCOPE, operation_id=uuid5(UUID(int=0), "provider-failure"), request_id="  "
+        )
+
+
+@pytest.mark.anyio
+async def test_provider_failure_requires_configured_coordinator() -> None:
+    service = OperationService(InMemoryOperationRepository())
+
+    with pytest.raises(RuntimeError, match="coordinator"):
+        await service.move_to_provider_manual_review(
+            SCOPE, operation_id=uuid5(UUID(int=0), "provider-failure"), request_id="request-1"
+        )
+
+
+class _RecordingProviderFailureCoordinator:
+    def __init__(self, result) -> None:
+        self.result = result
+        self.calls = []
+
+    async def move_to_manual_review(self, scope, *, operation_id, request_id):
+        self.calls.append((scope, operation_id, request_id))
+        return self.result
+
+
+@pytest.mark.anyio
+async def test_provider_failure_normalizes_request_id_and_delegates() -> None:
+    expected = object()
+    coordinator = _RecordingProviderFailureCoordinator(expected)
+    service = OperationService(InMemoryOperationRepository(), provider_queue_failure_coordinator=coordinator)
+    operation_id = uuid5(UUID(int=0), "provider-failure-delegate")
+
+    result = await service.move_to_provider_manual_review(SCOPE, operation_id=operation_id, request_id=" request-1 ")
+
+    assert result is expected
+    assert coordinator.calls == [(SCOPE, operation_id, "request-1")]
+
+
+@pytest.mark.anyio
+async def test_provider_failure_propagates_persistence_error() -> None:
+    class FailingCoordinator:
+        async def move_to_manual_review(self, *_args, **_kwargs):
+            raise OperationPersistenceError("safe persistence failure")
+
+    service = OperationService(InMemoryOperationRepository(), provider_queue_failure_coordinator=FailingCoordinator())
+    with pytest.raises(OperationPersistenceError, match="safe persistence failure"):
+        await service.move_to_provider_manual_review(SCOPE, operation_id=uuid5(UUID(int=0), "provider-failure-error"), request_id="request-1")
 
 
 @pytest.mark.anyio

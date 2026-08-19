@@ -22,7 +22,7 @@ services:
       start_period: 10s
 
   case-migrations:
-    image: langgraph-refund-agent:0.6.0
+    image: langgraph-refund-agent:0.7.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -44,7 +44,7 @@ services:
       retries: 10
 
   langgraph-api:
-    image: langgraph-refund-agent:0.6.0
+    image: langgraph-refund-agent:0.7.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -64,6 +64,40 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+
+  outbox-worker:
+    image: langgraph-refund-agent:0.7.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "agent.integrations.worker_main"]
+    environment:
+      POSTGRES_URI: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-refund_agent}?sslmode=disable
+      PROVIDER_CONNECTIONS_JSON: ${PROVIDER_CONNECTIONS_JSON:?Set PROVIDER_CONNECTIONS_JSON in .env}
+      PROVIDER_ALLOW_INSECURE_HTTP: ${PROVIDER_ALLOW_INSECURE_HTTP:-false}
+      OUTBOX_WORKER_ID: ${OUTBOX_WORKER_ID:-}
+    depends_on:
+      case-migrations:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  inbox-worker:
+    image: langgraph-refund-agent:0.7.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "agent.integrations.inbox_worker_main"]
+    environment:
+      POSTGRES_URI: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-refund_agent}?sslmode=disable
+      INBOX_WORKER_ID: ${INBOX_WORKER_ID:-}
+    depends_on:
+      case-migrations:
+        condition: service_completed_successfully
+      postgres:
         condition: service_healthy
 
 volumes:

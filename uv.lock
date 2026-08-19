@@ -402,10 +402,11 @@ wheels = [
 
 [[package]]
 name = "langgraph-refund-agent"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "langchain-openai" },
     { name = "langgraph" },
     { name = "psycopg", extra = ["binary"] },
@@ -426,6 +427,7 @@ dev = [
 requires-dist = [
     { name = "anyio", marker = "extra == 'dev'", specifier = ">=4.7.0" },
     { name = "fastapi", specifier = ">=0.116.0" },
+    { name = "httpx", specifier = ">=0.28.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.0" },
     { name = "langchain-openai", specifier = ">=1.4.2" },
     { name = "langgraph", specifier = ">=1.0.0" },

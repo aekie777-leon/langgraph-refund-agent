@@ -17,7 +17,9 @@ from agent.cases.repository import (
     ConcurrentCaseUpdateError,
     DuplicateIdempotencyKeyError,
     DuplicateSourceMessageError,
+    validate_case_command_association,
 )
+from agent.integrations.models import ProviderCommandEnvelope
 
 _UNRESOLVED_STATUSES = {"open", "in_progress", "on_hold"}
 _PRIORITY_RANK = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
@@ -49,6 +51,7 @@ class InMemoryCaseRepository:
     def __init__(self) -> None:
         self.cases: dict[UUID, SupportCase] = {}
         self.events: list[SupportCaseEvent] = []
+        self.outbox_commands: dict[UUID, ProviderCommandEnvelope] = {}
 
     async def get_case(self, scope: AccessScope, case_id: UUID) -> SupportCase | None:
         case = self.cases.get(case_id)
@@ -94,6 +97,7 @@ class InMemoryCaseRepository:
         *,
         thread_id: str,
         case_type: CaseType,
+        order_id: str | None = None,
     ) -> SupportCase | None:
         return next(
             (
@@ -102,6 +106,10 @@ class InMemoryCaseRepository:
                 if _case_visible(scope, case)
                 and case.thread_id == thread_id
                 and case.case_type == case_type
+                and (
+                    case_type != "delivery_investigation"
+                    or case.order_id == order_id
+                )
                 and case.status in _UNRESOLVED_STATUSES
             ),
             None,
@@ -179,11 +187,25 @@ class InMemoryCaseRepository:
             scope,
             thread_id=case.thread_id,
             case_type=case.case_type,
+            order_id=case.order_id,
         ):
             raise ActiveCaseConflictError(case.thread_id)
 
         self.cases[case.case_id] = case
         self.events.append(event)
+
+    async def create_case_with_event_and_command(
+        self,
+        scope: AccessScope,
+        *,
+        case: SupportCase,
+        event: SupportCaseEvent,
+        command: ProviderCommandEnvelope,
+    ) -> None:
+        """Create the case, its event, and record the outbox command in memory."""
+        validate_case_command_association(case=case, event=event, command=command)
+        await self.create_case_with_event(scope, case=case, event=event)
+        self.outbox_commands[command.command_id] = command
 
     async def update_case_with_event(
         self,
@@ -209,6 +231,46 @@ class InMemoryCaseRepository:
 
         self.cases[case.case_id] = case
         self.events.append(event)
+
+    async def update_case_with_event_and_command(
+        self,
+        scope: AccessScope,
+        *,
+        case: SupportCase,
+        event: SupportCaseEvent,
+        command: ProviderCommandEnvelope,
+        expected_version: int,
+    ) -> None:
+        """Update the case, append the event, and record the command in memory."""
+        validate_case_command_association(case=case, event=event, command=command)
+        await self.update_case_with_event(
+            scope,
+            case=case,
+            event=event,
+            expected_version=expected_version,
+        )
+        self.outbox_commands[command.command_id] = command
+
+    async def append_delivery_trigger_and_ensure_command(
+        self,
+        scope: AccessScope,
+        *,
+        case: SupportCase,
+        event: SupportCaseEvent,
+        command: ProviderCommandEnvelope,
+        expected_version: int,
+    ) -> bool:
+        """Mirror the atomic delivery repair boundary for graph tests."""
+        has_command = any(
+            existing.aggregate_id == case.case_id
+            for existing in self.outbox_commands.values()
+        )
+        await self.update_case_with_event(
+            scope, case=case, event=event, expected_version=expected_version
+        )
+        if not has_command:
+            self.outbox_commands[command.command_id] = command
+        return not has_command
 
 
 def _validate_ownership(scope: AccessScope, customer_id: str, tenant_id: str) -> None:

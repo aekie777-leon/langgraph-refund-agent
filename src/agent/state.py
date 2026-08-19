@@ -52,6 +52,7 @@ class RefundState(MessagesState, total=False):
     support_case_priority: CasePriority | None
     support_case_status: CaseStatus | None
     support_case_reason_codes: list[HandoffReason]
+    provider_failure_case_persisted: bool
     operation_snapshot: dict[str, Any]
     operation_lookup_success: bool
     operation_extraction: dict[str, Any]
@@ -104,6 +105,7 @@ def new_turn_state(decision: Intent | None) -> dict[str, Any]:
         "support_case_priority": None,
         "support_case_status": None,
         "support_case_reason_codes": [],
+        "provider_failure_case_persisted": False,
         "operation_snapshot": {},
         "operation_lookup_success": False,
         "operation_extraction": {},

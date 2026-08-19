@@ -1,5 +1,6 @@
 """Provide application-scoped dependencies for order-operation graph nodes."""
 
+from agent.integrations.provider import ProviderConnectionResolver
 from agent.operations.models import (
     ExistingOperation,
     OrderOperationRequest,
@@ -8,21 +9,28 @@ from agent.operations.models import (
 from agent.operations.provider import OrderProvider
 from agent.operations.service import OperationService
 
+
+class ProviderConfigurationUnavailableError(RuntimeError):
+    """Report an explicitly unavailable provider-connection configuration."""
+
 _order_provider: OrderProvider | None = None
 _operation_service: OperationService | None = None
+_provider_connection_resolver: ProviderConnectionResolver | None = None
 
 
 def configure_operation_dependencies(
     *,
     order_provider: OrderProvider,
     operation_service: OperationService,
+    provider_connection_resolver: ProviderConnectionResolver | None = None,
 ) -> None:
     """Register dependencies once during application startup."""
-    global _order_provider, _operation_service
+    global _order_provider, _operation_service, _provider_connection_resolver
     if _order_provider is not None or _operation_service is not None:
         raise RuntimeError("Order-operation dependencies have already been configured")
     _order_provider = order_provider
     _operation_service = operation_service
+    _provider_connection_resolver = provider_connection_resolver
 
 
 def get_order_provider() -> OrderProvider:
@@ -39,11 +47,30 @@ def get_operation_service() -> OperationService:
     return _operation_service
 
 
+def get_provider_connection_resolver() -> ProviderConnectionResolver:
+    """Return the configured provider connection resolver for queueing."""
+    if _provider_connection_resolver is None:
+        raise ProviderConfigurationUnavailableError("Provider connection resolver is unavailable")
+    return _provider_connection_resolver
+
+
+class RuntimeProviderConnectionResolver:
+    """Resolve the application-configured connection only when a graph node runs."""
+
+    async def resolve(self, *, tenant_id: str, capability):
+        """Delegate tenant/capability selection after application startup."""
+        return await get_provider_connection_resolver().resolve(
+            tenant_id=tenant_id,
+            capability=capability,
+        )
+
+
 def clear_operation_dependencies() -> None:
     """Clear application-scoped operation dependencies during shutdown."""
-    global _order_provider, _operation_service
+    global _order_provider, _operation_service, _provider_connection_resolver
     _order_provider = None
     _operation_service = None
+    _provider_connection_resolver = None
 
 
 class RuntimeOrderProvider:
@@ -104,6 +131,14 @@ class RuntimeOperationService:
     async def submit_confirmed_operation(self, scope, **kwargs):
         """Delegate automatic submission after application startup."""
         return await get_operation_service().submit_confirmed_operation(scope, **kwargs)
+
+    async def queue_confirmed_operation(self, scope, **kwargs):
+        """Delegate atomic provider queueing after application startup."""
+        return await get_operation_service().queue_confirmed_operation(scope, **kwargs)
+
+    async def move_to_provider_manual_review(self, scope, **kwargs):
+        """Delegate provider configuration fallback atomically."""
+        return await get_operation_service().move_to_provider_manual_review(scope, **kwargs)
 
     async def confirm_operation(self, scope, **kwargs):
         """Delegate manual confirmation after application startup."""

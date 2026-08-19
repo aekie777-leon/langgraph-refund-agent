@@ -34,6 +34,8 @@ from agent.cases.repository import (
     DuplicateIdempotencyKeyError,
     DuplicateSourceMessageError,
 )
+from agent.integrations.models import ProviderCommandEnvelope
+from agent.operations.models import DeliveryIssueType
 from agent.schemas import SemanticRiskLevel
 
 Clock = Callable[[], datetime]
@@ -168,6 +170,7 @@ class CaseService:
                 scope,
                 thread_id=trigger.thread_id,
                 case_type=decision.case_type,
+                order_id=trigger.order_id,
             )
 
             try:
@@ -193,6 +196,76 @@ class CaseService:
 
         raise ConcurrentCaseUpdateError(
             "Could not record the handoff after concurrent write conflicts"
+        ) from last_conflict
+
+    async def record_delivery_investigation(
+        self,
+        scope: AccessScope,
+        *,
+        trigger: CaseTrigger,
+        decision: HandoffDecision,
+        issue_type: DeliveryIssueType,
+        connection_id: str,
+    ) -> CaseServiceResult:
+        """Create a delivery case and its provider command in one transaction.
+
+        Existing unresolved investigations deliberately retain their original
+        provider command: a new customer message appends only a case event and
+        must not create a second provider investigation.
+        """
+        if scope.customer_id is None:
+            raise ValueError("only customers may create support cases")
+        if (
+            not decision.should_create_case
+            or decision.case_type != "delivery_investigation"
+            or decision.priority is None
+        ):
+            raise ValueError("a delivery-investigation handoff decision is required")
+        normalized_connection_id = connection_id.strip()
+        if not normalized_connection_id:
+            raise ValueError("connection_id must not be empty")
+
+        last_conflict: RuntimeError | None = None
+        for _attempt in range(self._max_write_attempts):
+            duplicate = await self._repository.find_by_source_message(
+                scope,
+                thread_id=trigger.thread_id,
+                source_message_id=trigger.source_message_id,
+            )
+            if duplicate is not None:
+                return CaseServiceResult(action="duplicate_ignored", case=duplicate)
+            existing = await self._repository.find_unresolved_case(
+                scope,
+                thread_id=trigger.thread_id,
+                case_type="delivery_investigation",
+                order_id=trigger.order_id,
+            )
+            try:
+                if existing is not None:
+                    return await self._append_trigger(
+                        scope,
+                        existing=existing,
+                        trigger=trigger,
+                        decision=decision,
+                        issue_type=issue_type,
+                        connection_id=normalized_connection_id,
+                    )
+                return await self._create_delivery_case_with_command(
+                    scope,
+                    trigger=trigger,
+                    decision=decision,
+                    issue_type=issue_type,
+                    connection_id=normalized_connection_id,
+                )
+            except (
+                ActiveCaseConflictError,
+                ConcurrentCaseUpdateError,
+                DuplicateIdempotencyKeyError,
+                DuplicateSourceMessageError,
+            ) as error:
+                last_conflict = error
+        raise ConcurrentCaseUpdateError(
+            "Could not record the delivery investigation after concurrent write conflicts"
         ) from last_conflict
 
     async def change_status(
@@ -455,6 +528,72 @@ class CaseService:
         await self._repository.create_case_with_event(scope, case=case, event=event)
         return CaseServiceResult(action="created", case=case, event=event)
 
+    async def _create_delivery_case_with_command(
+        self,
+        scope: AccessScope,
+        *,
+        trigger: CaseTrigger,
+        decision: HandoffDecision,
+        issue_type: DeliveryIssueType,
+        connection_id: str,
+    ) -> CaseServiceResult:
+        """Compose a new investigation aggregate, creation event, and Outbox row."""
+        assert decision.priority is not None
+        assert scope.customer_id is not None
+        if trigger.order_id is None:
+            raise ValueError("delivery investigation requires an order_id")
+        now = self._clock()
+        case = SupportCase(
+            case_id=self._id_factory(),
+            thread_id=trigger.thread_id,
+            source_message_id=trigger.source_message_id,
+            order_id=trigger.order_id,
+            case_type="delivery_investigation",
+            priority=decision.priority,
+            risk_level=trigger.risk_level,
+            risk_categories=trigger.risk_categories,
+            reason_codes=decision.reason_codes,
+            display_reason=decision.display_reason,
+            triggering_message_excerpt=trigger.triggering_message_excerpt,
+            created_at=now,
+            updated_at=now,
+            customer_id=scope.customer_id,
+            tenant_id=scope.tenant_id,
+            created_by=scope.identity,
+        )
+        event = SupportCaseEvent(
+            event_id=self._id_factory(),
+            idempotency_key=self._message_idempotency_key(trigger),
+            case_id=case.case_id,
+            event_type="case_created",
+            source_message_id=trigger.source_message_id,
+            order_id=trigger.order_id,
+            risk_level=trigger.risk_level,
+            risk_categories=trigger.risk_categories,
+            reason_codes=decision.reason_codes,
+            triggering_message_excerpt=trigger.triggering_message_excerpt,
+            current_priority=case.priority,
+            current_status=case.status,
+            actor="system",
+            customer_id=case.customer_id,
+            tenant_id=case.tenant_id,
+            created_at=now,
+        )
+        command = ProviderCommandEnvelope.for_delivery_investigation(
+            case=case,
+            issue_type=issue_type,
+            connection_id=connection_id,
+            command_id=self._id_factory(),
+            created_at=now,
+        )
+        await self._repository.create_case_with_event_and_command(
+            scope,
+            case=case,
+            event=event,
+            command=command,
+        )
+        return CaseServiceResult(action="created", case=case, event=event)
+
     async def _append_trigger(
         self,
         scope: AccessScope,
@@ -462,6 +601,8 @@ class CaseService:
         existing: SupportCase,
         trigger: CaseTrigger,
         decision: HandoffDecision,
+        issue_type: DeliveryIssueType | None = None,
+        connection_id: str | None = None,
     ) -> CaseServiceResult:
         """Merge summary fields and append one immutable trigger event."""
         assert decision.priority is not None
@@ -515,12 +656,42 @@ class CaseService:
             created_at=now,
         )
 
-        await self._repository.update_case_with_event(
-            scope,
-            case=updated,
-            event=event,
-            expected_version=existing.version,
-        )
+        if existing.case_type == "delivery_investigation":
+            # Legacy/general handoff callers do not own the provider boundary.
+            # Only the Step-3 queueing path supplies command metadata.
+            if issue_type is None or connection_id is None:
+                await self._repository.update_case_with_event(
+                    scope,
+                    case=updated,
+                    event=event,
+                    expected_version=existing.version,
+                )
+                return CaseServiceResult(
+                    action="event_appended",
+                    case=updated,
+                    event=event,
+                )
+            command = ProviderCommandEnvelope.for_delivery_investigation(
+                case=updated,
+                issue_type=issue_type,
+                connection_id=connection_id,
+                command_id=self._id_factory(),
+                created_at=now,
+            )
+            await self._repository.append_delivery_trigger_and_ensure_command(
+                scope,
+                case=updated,
+                event=event,
+                command=command,
+                expected_version=existing.version,
+            )
+        else:
+            await self._repository.update_case_with_event(
+                scope,
+                case=updated,
+                event=event,
+                expected_version=existing.version,
+            )
         return CaseServiceResult(
             action="event_appended",
             case=updated,

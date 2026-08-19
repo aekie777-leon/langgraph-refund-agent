@@ -1,6 +1,6 @@
 [project]
 name = "langgraph-refund-agent"
-version = "0.6.0"
+version = "0.7.0"
 description = "A risk-aware, human-in-the-loop customer-service assistant built with LangGraph."
 authors = [{ name = "duxingru" }]
 readme = "README.md"
@@ -8,6 +8,7 @@ license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.116.0",
+    "httpx>=0.28.0",
     "langchain-openai>=1.4.2",
     "langgraph>=1.0.0",
     "psycopg[binary]>=3.3.4",

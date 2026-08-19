@@ -17,8 +17,8 @@ class OrderNotAccessibleError(RuntimeError):
     """Report that an order does not exist or does not belong to the caller."""
 
 
-class OrderProvider(Protocol):
-    """Read current order facts and submit confirmed customer operations."""
+class OrderQueryProvider(Protocol):
+    """Synchronous order and inventory reads (v0.7 core read boundary)."""
 
     async def get_order_for_customer(
         self,
@@ -45,6 +45,17 @@ class OrderProvider(Protocol):
         """
         ...
 
+
+class OrderCommandAdapter(Protocol):
+    """Submit confirmed order-operation commands to a provider.
+
+    This is the v0.7 command boundary: it sends commands to the provider over
+    the transport, it does not enqueue locally. Delivery is at-least-once and
+    the provider must deduplicate on the stable ``idempotency_key``. The
+    LangGraph layer must not depend on this adapter directly in the long term;
+    it will be driven by the outbox worker instead.
+    """
+
     async def submit_operation(
         self,
         *,
@@ -52,9 +63,20 @@ class OrderProvider(Protocol):
         expected_order_version: int,
         idempotency_key: str,
     ) -> ExistingOperation:
-        """Submit one confirmed operation or raise StaleOrderVersionError.
+        """Send one confirmed operation to the provider.
 
-        Raise OrderNotAccessibleError when the order does not exist or does not
+        Raise StaleOrderVersionError when the provider's order version changed
+        and OrderNotAccessibleError when the order does not exist or does not
         belong to the request owner.
         """
         ...
+
+
+class OrderProvider(OrderQueryProvider, OrderCommandAdapter, Protocol):
+    """Transitional compatibility boundary (v0.6 -> v0.7).
+
+    Keeps the existing graph, services, and fakes working unchanged while the
+    v0.7 outbox/worker command path is introduced. New code should depend on
+    ``OrderQueryProvider`` or ``OrderCommandAdapter`` instead; remove this
+    composition once the command path no longer flows through the graph.
+    """

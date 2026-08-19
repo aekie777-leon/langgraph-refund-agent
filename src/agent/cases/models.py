@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
+from agent.integrations.models import ProviderCommandExecutionStatus
 from agent.schemas import (
     SemanticRiskCategory,
     SemanticRiskLevel,
@@ -28,6 +29,7 @@ CaseEventType = Literal[
     "trigger_appended",
     "status_changed",
     "assigned",
+    "provider_update",
 ]
 CaseServiceAction = Literal[
     "not_created",
@@ -95,6 +97,7 @@ HandoffReason = Literal[
     "delivery_marked_received_dispute",
     "delivery_damage_claim",
     "delivery_other_issue",
+    "provider_delivery_failed",
 ]
 
 
@@ -247,13 +250,17 @@ class SupportCase(BaseModel):
 
     @model_validator(mode="after")
     def validate_lifecycle_fields(self) -> Self:
-        """Keep timestamps and on-hold metadata internally consistent."""
+        """Keep timestamps, on-hold metadata, and case type consistent."""
         if self.updated_at < self.created_at:
             raise ValueError("updated_at must not be earlier than created_at")
         if self.status == "on_hold" and self.on_hold_reason is None:
             raise ValueError("on_hold_reason is required when status is 'on_hold'")
         if self.status != "on_hold" and self.on_hold_reason is not None:
             raise ValueError("on_hold_reason is only allowed when status is 'on_hold'")
+        if self.case_type == "delivery_investigation" and self.order_id is None:
+            raise ValueError(
+                "delivery_investigation cases require an order_id"
+            )
         return self
 
 
@@ -283,6 +290,9 @@ class SupportCaseEvent(BaseModel):
     on_hold_reason: OnHoldReason | None = None
     previous_assigned_agent_id: str | None = Field(default=None, min_length=1)
     current_assigned_agent_id: str | None = Field(default=None, min_length=1)
+    provider_command_id: UUID | None = None
+    provider_command_status: ProviderCommandExecutionStatus | None = None
+    provider_reference: str | None = Field(default=None, min_length=1)
     actor: str | None = None
     customer_id: str = Field(min_length=1)
     tenant_id: str = Field(min_length=1)
@@ -313,6 +323,23 @@ class SupportCaseEvent(BaseModel):
                 )
             if not self.actor:
                 raise ValueError("actor is required for assigned events")
+            return self
+
+        if self.event_type == "provider_update":
+            if self.provider_command_id is None:
+                raise ValueError(
+                    "provider_command_id is required for provider_update events"
+                )
+            if self.provider_command_status is None:
+                raise ValueError(
+                    "provider_command_status is required for provider_update events"
+                )
+            if not self.actor:
+                raise ValueError("actor is required for provider_update events")
+            if self.previous_status is not None or self.current_status is not None:
+                raise ValueError(
+                    "provider_update events must not carry case status fields"
+                )
             return self
 
         if self.previous_status is None or self.current_status is None:

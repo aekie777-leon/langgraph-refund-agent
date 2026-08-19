@@ -13,6 +13,7 @@ from langgraph.types import Command, interrupt
 from agent.auth.context import require_scope
 from agent.cases.models import CaseListQuery
 from agent.cases.runtime import get_case_service
+from agent.integrations.provider import ProviderConnectionNotFoundError
 from agent.nodes.cases import require_thread_id
 from agent.nodes.orders import build_order_detection_node
 from agent.operations.models import (
@@ -27,11 +28,14 @@ from agent.operations.policy import (
     evaluate_operation,
 )
 from agent.operations.provider import (
-    OrderNotAccessibleError,
     OrderProvider,
-    StaleOrderVersionError,
 )
-from agent.operations.runtime import get_operation_service, get_order_provider
+from agent.operations.runtime import (
+    ProviderConfigurationUnavailableError,
+    get_operation_service,
+    get_order_provider,
+    get_provider_connection_resolver,
+)
 from agent.operations.service import OperationService
 from agent.prompts import OPERATION_REQUEST_EXTRACTION_SYSTEM_PROMPT
 from agent.schemas import OperationRequestExtraction
@@ -305,7 +309,7 @@ def build_submit_confirmed_operation_node(
     provider: OrderProvider,
     service: OperationService,
 ):
-    """Build the automatic provider-submission node."""
+    """Build the atomic queueing node for automatic provider operations."""
 
     async def submit_confirmed_operation(
         state: RefundState,
@@ -313,30 +317,45 @@ def build_submit_confirmed_operation_node(
     ) -> dict[str, Any]:
         operation_id = _operation_id(state)
         try:
-            result = await service.submit_confirmed_operation(
-                require_scope(config),
-                operation_id=operation_id,
-                request_id=f"graph-submit:{operation_id}",
-                provider=provider,
+            connection = await get_provider_connection_resolver().resolve(
+                tenant_id=require_scope(config).tenant_id,
+                capability="order_operation",
             )
-        except (StaleOrderVersionError, OrderNotAccessibleError):
-            result = await service.update_operation_status(
+            result = await service.queue_confirmed_operation(
                 require_scope(config),
                 operation_id=operation_id,
-                target_status="rejected",
-                request_id=f"graph-stale:{operation_id}",
-                actor="system",
+                request_id=f"graph-queue:{operation_id}",
+                connection_id=connection.connection_id,
+            )
+        except (ProviderConnectionNotFoundError, ProviderConfigurationUnavailableError):
+            fallback = await service.move_to_provider_manual_review(
+                require_scope(config),
+                operation_id=operation_id,
+                request_id=f"graph-provider-config-failure:{operation_id}",
             )
             return {
-                "operation_status": result.operation.status,
-                "operation_service_action": result.action,
-                "messages": [AIMessage(content="The order changed before submission. Please review the current order and submit a new request.")],
+                "operation_status": fallback.operation.status,
+                "operation_service_action": fallback.action,
+                "support_case_action": (
+                    "created"
+                    if fallback.action == "created"
+                    else "event_appended"
+                    if fallback.action == "reused"
+                    else "duplicate_ignored"
+                ),
+                "support_case_id": str(fallback.support_case.case_id),
+                "support_case_type": fallback.support_case.case_type,
+                "support_case_priority": fallback.support_case.priority,
+                "support_case_status": fallback.support_case.status,
+                "support_case_reason_codes": list(fallback.support_case.reason_codes),
+                "provider_failure_case_persisted": True,
+                "messages": [AIMessage(content="Your request requires human review before it can be processed.")],
             }
         return {
             "operation_status": result.operation.status,
             "operation_service_action": result.action,
             "provider_reference": result.operation.provider_reference,
-            "messages": [AIMessage(content="Your order operation has been submitted successfully.")],
+            "messages": [AIMessage(content="Your request has been accepted for processing.")],
         }
 
     return submit_confirmed_operation
@@ -418,6 +437,14 @@ def build_attach_operation_case_node(service: OperationService):
             or not isinstance(case_id, str)
             or state.get("operation_status") != "manual_review"
         ):
+            return {}
+        if (
+            state.get("support_case_type") == "order_operation_review"
+            and "provider_delivery_failed" in state.get("support_case_reason_codes", [])
+        ):
+            # The provider-failure coordinator already linked this exact
+            # operation and case atomically; attaching again only overwrites
+            # its meaningful service action with status_unchanged.
             return {}
         result = await service.attach_support_case(
             require_scope(config),

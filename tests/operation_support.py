@@ -3,15 +3,23 @@
 from uuid import UUID
 
 from agent.auth.models import AccessScope
+from agent.integrations.models import ProviderCommandEnvelope
 from agent.operations.models import OrderOperation, OrderOperationEvent
 from agent.operations.repository import (
     ActiveOrderOperationConflictError,
     ConcurrentOperationUpdateError,
     DuplicateOperationIdempotencyError,
     DuplicateOperationSourceMessageError,
+    validate_operation_command_association,
 )
 
-_ACTIVE_STATUSES = {"pending_confirmation", "submitted", "processing", "manual_review"}
+_ACTIVE_STATUSES = {
+    "pending_confirmation",
+    "queued",
+    "submitted",
+    "processing",
+    "manual_review",
+}
 
 
 def _operation_visible(scope: AccessScope, operation: OrderOperation) -> bool:
@@ -36,6 +44,7 @@ class InMemoryOperationRepository:
     def __init__(self) -> None:
         self.operations: dict[UUID, OrderOperation] = {}
         self.events: list[OrderOperationEvent] = []
+        self.outbox_commands: dict[UUID, ProviderCommandEnvelope] = {}
 
     async def get_operation(
         self,
@@ -136,6 +145,30 @@ class InMemoryOperationRepository:
                 raise DuplicateOperationIdempotencyError(operation.idempotency_key)
         self.operations[operation.operation_id] = operation
         self.events.extend(events)
+
+    async def queue_operation_with_events_and_command(
+        self,
+        scope: AccessScope,
+        *,
+        operation: OrderOperation,
+        events: tuple[OrderOperationEvent, ...],
+        command: ProviderCommandEnvelope,
+        expected_version: int,
+    ) -> None:
+        """Update the operation, append events, and record the command in memory."""
+        validate_operation_command_association(
+            operation=operation,
+            events=events,
+            command=command,
+            expected_version=expected_version,
+        )
+        await self.update_operation_with_events(
+            scope,
+            operation=operation,
+            events=events,
+            expected_version=expected_version,
+        )
+        self.outbox_commands[command.command_id] = command
 
 
 def _validate_ownership(scope: AccessScope, customer_id: str, tenant_id: str) -> None:

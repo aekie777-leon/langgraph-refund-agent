@@ -94,6 +94,7 @@ def test_project_migrations_include_current_schema_history() -> None:
         "0004_order_operations.sql",
         "0005_identity_and_ownership.sql",
         "0006_case_assignment.sql",
+        "0007_provider_messaging.sql",
     ]
 
 

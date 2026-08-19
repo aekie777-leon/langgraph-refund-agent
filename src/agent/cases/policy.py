@@ -264,6 +264,9 @@ _REASON_POLICIES: dict[HandoffReason, _ReasonPolicy] = {
     "exchange_inventory_unknown": _ReasonPolicy(
         "order_operation_review", "p2", "Replacement inventory needs manual review."
     ),
+    "provider_delivery_failed": _ReasonPolicy(
+        "order_operation_review", "p1", "Provider delivery failed and requires human review."
+    ),
     "delivery_data_invalid": _ReasonPolicy(
         "delivery_investigation", "p1", "Delivery data needs investigation."
     ),

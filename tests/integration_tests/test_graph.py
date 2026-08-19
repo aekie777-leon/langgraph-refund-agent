@@ -1,6 +1,8 @@
 """Offline integration tests for the compiled refund graph."""
 
 import re
+from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -10,8 +12,15 @@ from langgraph.types import Command
 from agent import graph as graph_module
 from agent import models
 from agent.auth.provider import UnauthenticatedError
+from agent.cases.models import SupportCase, SupportCaseEvent
 from agent.cases.service import CaseService
+from agent.integrations.models import ProviderAuthentication, ProviderConnection
+from agent.integrations.provider import ProviderConnectionNotFoundError
+from agent.integrations.provider_failure import ProviderQueueFailureResult
+from agent.nodes.cases import build_finalize_case_handoff_node
 from agent.operations.demo_provider import DemoOrderProvider
+from agent.operations.models import OrderOperationEvent
+from agent.operations.runtime import ProviderConfigurationUnavailableError
 from agent.operations.service import OperationService
 from agent.schemas import (
     FormalComplaintDetection,
@@ -176,6 +185,81 @@ class FakeOperationExtractor:
         )
 
 
+class FakeProviderConnectionResolver:
+    """Resolve one safe connection for offline queued-operation graph tests."""
+
+    async def resolve(self, *, tenant_id: str, capability: str) -> ProviderConnection:
+        return ProviderConnection(
+            connection_id="provider-demo",
+            tenant_id=tenant_id,
+            capability=capability,
+            base_url="https://provider.example.test",
+            endpoint="/v1/commands",
+            authentication=ProviderAuthentication(scheme="none"),
+        )
+
+
+class UnavailableProviderConnectionResolver:
+    async def resolve(self, **_kwargs):
+        raise ProviderConfigurationUnavailableError("unavailable")
+
+
+class MissingProviderConnectionResolver:
+    async def resolve(self, **_kwargs):
+        raise ProviderConnectionNotFoundError("missing")
+
+
+class BrokenProviderConnectionResolver:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def resolve(self, **_kwargs):
+        raise self._error
+
+
+class InMemoryProviderQueueFailureCoordinator:
+    """Test-only atomic-shape fake for the provider configuration fallback."""
+
+    def __init__(self, operations, cases) -> None:
+        self.operations, self.cases = operations, cases
+
+    async def move_to_manual_review(self, scope, *, operation_id, request_id):
+        operation = self.operations.operations[operation_id]
+        if operation.status == "manual_review":
+            case = self.cases.cases[operation.support_case_id]
+            return ProviderQueueFailureResult(operation, case, "duplicate_ignored")
+        existing = next((case for case in self.cases.cases.values() if case.tenant_id == scope.tenant_id and case.thread_id == operation.thread_id and case.case_type == "order_operation_review" and case.status != "resolved"), None)
+        now = datetime.now(UTC)
+        if existing is None:
+            case = SupportCase(case_id=uuid4(), thread_id=operation.thread_id, source_message_id=operation.source_message_id, order_id=operation.order_id, case_type="order_operation_review", priority="p1", reason_codes=("provider_delivery_failed",), display_reason="Provider delivery failed and requires human review.", triggering_message_excerpt=operation.request_excerpt, created_at=now, updated_at=now, customer_id=operation.customer_id, tenant_id=operation.tenant_id, created_by="system")
+            self.cases.cases[case.case_id] = case
+            self.cases.events.append(SupportCaseEvent(event_id=uuid4(), idempotency_key=f"test-provider-failure:{operation_id}:case", case_id=case.case_id, event_type="case_created", source_message_id=case.source_message_id, order_id=case.order_id, reason_codes=case.reason_codes, triggering_message_excerpt=case.triggering_message_excerpt, current_priority="p1", current_status="open", customer_id=case.customer_id, tenant_id=case.tenant_id, created_at=now))
+            action = "created"
+        else:
+            case = existing
+            action = "reused"
+        updated = operation.model_copy(update={"status": "manual_review", "requires_manual_review": True, "review_case_type": "order_operation_review", "review_priority": "p1", "support_case_id": case.case_id, "updated_at": now, "version": operation.version + 1})
+        self.operations.operations[operation_id] = updated
+        for event_type in ("confirmation_recorded", "status_changed", "support_case_attached"):
+            self.operations.events.append(OrderOperationEvent(event_id=uuid4(), idempotency_key=f"test-provider-failure:{operation_id}:{event_type}", operation_id=operation_id, event_type=event_type, previous_status="pending_confirmation" if event_type == "status_changed" else None, current_status="manual_review" if event_type == "status_changed" else None, support_case_id=case.case_id if event_type == "support_case_attached" else None, actor="system", customer_id=operation.customer_id, tenant_id=operation.tenant_id, created_at=now))
+        return ProviderQueueFailureResult(updated, case, action)
+
+
+def _provider_failure_graph(monkeypatch, case_repository, resolver):
+    """Build the real resumable graph with a test-only failure coordinator."""
+    monkeypatch.setattr(models, "get_order_detector", lambda: FakeOrderDetector())
+    monkeypatch.setattr(models, "get_router", lambda: FakeRouter())
+    monkeypatch.setattr(models, "get_formal_complaint_classifier", lambda: FakeFormalComplaintClassifier())
+    monkeypatch.setattr(models, "get_risk_classifier", lambda: FakeRiskClassifier())
+    monkeypatch.setattr(models, "get_llm", lambda: FakeComplaintModel())
+    monkeypatch.setattr(models, "get_operation_request_extractor", lambda: FakeOperationExtractor())
+    monkeypatch.setattr("agent.nodes.operations.get_provider_connection_resolver", lambda: resolver)
+    monkeypatch.setattr("agent.nodes.cases.get_provider_connection_resolver", lambda: resolver)
+    operations = InMemoryOperationRepository()
+    service = OperationService(operations, provider_queue_failure_coordinator=InMemoryProviderQueueFailureCoordinator(operations, case_repository))
+    return graph_module.build_graph(case_service_provider=lambda: CaseService(case_repository), order_provider=DemoOrderProvider(), operation_service=service, checkpointer=MemorySaver()), operations
+
+
 @pytest.fixture
 def case_repository() -> InMemoryCaseRepository:
     return InMemoryCaseRepository()
@@ -191,12 +275,18 @@ def refund_graph(
         "get_order_detector",
         lambda: FakeOrderDetector(),
     )
+    resolver = FakeProviderConnectionResolver()
+    monkeypatch.setattr("agent.nodes.operations.get_provider_connection_resolver", lambda: resolver)
+    monkeypatch.setattr("agent.nodes.cases.get_provider_connection_resolver", lambda: resolver)
     monkeypatch.setattr(models, "get_router", lambda: FakeRouter())
     monkeypatch.setattr(
         models,
         "get_formal_complaint_classifier",
         lambda: FakeFormalComplaintClassifier(),
     )
+    resolver = FakeProviderConnectionResolver()
+    monkeypatch.setattr("agent.nodes.operations.get_provider_connection_resolver", lambda: resolver)
+    monkeypatch.setattr("agent.nodes.cases.get_provider_connection_resolver", lambda: resolver)
     monkeypatch.setattr(
         models,
         "get_risk_classifier",
@@ -223,6 +313,9 @@ def resumable_operation_graph(
     case_repository: InMemoryCaseRepository,
 ):
     monkeypatch.setattr(models, "get_order_detector", lambda: FakeOrderDetector())
+    resolver = FakeProviderConnectionResolver()
+    monkeypatch.setattr("agent.nodes.operations.get_provider_connection_resolver", lambda: resolver)
+    monkeypatch.setattr("agent.nodes.cases.get_provider_connection_resolver", lambda: resolver)
     monkeypatch.setattr(models, "get_router", lambda: FakeRouter())
     monkeypatch.setattr(
         models,
@@ -701,7 +794,7 @@ async def test_graph_confirms_eligible_return_without_a_support_case(
 
     assert initial["__interrupt__"]
     assert result["operation_outcome"] == "eligible"
-    assert result["operation_status"] == "submitted"
+    assert result["operation_status"] == "queued"
     assert result["support_case_action"] == "not_created"
 
 
@@ -747,8 +840,124 @@ async def test_graph_confirms_available_exchange_without_a_support_case(
 
     assert initial["__interrupt__"]
     assert result["operation_outcome"] == "eligible"
-    assert result["operation_status"] == "submitted"
+    assert result["operation_status"] == "queued"
     assert result["support_case_action"] == "not_created"
+
+
+async def test_graph_provider_configuration_unavailable_creates_manual_review_case(monkeypatch, case_repository) -> None:
+    graph, operations = _provider_failure_graph(monkeypatch, case_repository, UnavailableProviderConnectionResolver())
+    config = _run_config("provider-unavailable-cancel")
+    await graph.ainvoke({"messages": [HumanMessage(id="provider-unavailable-cancel", content="Please cancel ORD-10008.")]}, config=config)
+    result = await graph.ainvoke(Command(resume=True), config=config)
+    assert result["operation_status"] == "manual_review"
+    assert result["operation_service_action"] == "created"
+    assert result["support_case_action"] == "created"
+    assert result["support_case_type"] == "order_operation_review"
+    assert result["support_case_priority"] == "p1"
+    assert result["support_case_status"] == "open"
+    assert "provider_delivery_failed" in result["support_case_reason_codes"]
+    assert result["provider_failure_case_persisted"] is False
+    assert operations.outbox_commands == {}
+
+
+async def test_graph_provider_connection_not_found_creates_manual_review_case(monkeypatch, case_repository) -> None:
+    graph, operations = _provider_failure_graph(monkeypatch, case_repository, MissingProviderConnectionResolver())
+    config = _run_config("provider-missing-return")
+    await graph.ainvoke({"messages": [HumanMessage(id="provider-missing-return", content="Please return ORD-10001.")]}, config=config)
+    result = await graph.ainvoke(Command(resume=True), config=config)
+    assert result["operation_status"] == "manual_review"
+    assert result["support_case_action"] == "created"
+    assert operations.outbox_commands == {}
+
+
+async def test_graph_provider_configuration_failure_replay_is_idempotent(monkeypatch, case_repository) -> None:
+    graph, operations = _provider_failure_graph(monkeypatch, case_repository, UnavailableProviderConnectionResolver())
+    config = _run_config("provider-unavailable-replay")
+    payload = {"messages": [HumanMessage(id="provider-unavailable-replay-message", content="Please cancel ORD-10008.")]}
+    await graph.ainvoke(payload, config=config)
+    first = await graph.ainvoke(Command(resume=True), config=config)
+    operation = next(iter(operations.operations.values()))
+    case_count, operation_event_count, case_event_count = len(case_repository.cases), len(operations.events), len(case_repository.events)
+
+    replay = await graph.ainvoke(payload, config=config)
+
+    assert first["support_case_action"] == "created"
+    assert replay["operation_status"] == "manual_review"
+    # A new graph turn intentionally consumes the one-shot handoff marker.
+    # Its no-case result means no second handoff was persisted.
+    assert replay["support_case_action"] == "not_created"
+    assert len(case_repository.cases) == case_count
+    assert len(operations.events) == operation_event_count
+    assert len(case_repository.events) == case_event_count
+    assert next(iter(operations.operations.values())).support_case_id == operation.support_case_id
+    assert operations.outbox_commands == {}
+
+
+async def test_graph_return_provider_configuration_failure_uses_manual_review(monkeypatch, case_repository) -> None:
+    graph, _ = _provider_failure_graph(monkeypatch, case_repository, UnavailableProviderConnectionResolver())
+    config = _run_config("provider-return-failure")
+    await graph.ainvoke({"messages": [HumanMessage(id="provider-return-failure", content="Please return ORD-10001.")]}, config=config)
+    result = await graph.ainvoke(Command(resume=True), config=config)
+    assert result["operation_status"] == "manual_review"
+    assert result["support_case_type"] == "order_operation_review"
+
+
+async def test_graph_exchange_provider_configuration_failure_uses_manual_review(monkeypatch, case_repository) -> None:
+    graph, _ = _provider_failure_graph(monkeypatch, case_repository, UnavailableProviderConnectionResolver())
+    config = _run_config("provider-exchange-failure")
+    await graph.ainvoke({"messages": [HumanMessage(id="provider-exchange-failure", content="Please exchange ORD-10001.")]}, config=config)
+    result = await graph.ainvoke(Command(resume=True), config=config)
+    assert result["operation_status"] == "manual_review"
+    assert result["support_case_priority"] == "p1"
+
+
+async def test_graph_normal_provider_connection_still_queues_one_outbox(monkeypatch, case_repository) -> None:
+    graph, operations = _provider_failure_graph(monkeypatch, case_repository, FakeProviderConnectionResolver())
+    config = _run_config("provider-normal-return")
+    await graph.ainvoke({"messages": [HumanMessage(id="provider-normal-return", content="Please return ORD-10001.")]}, config=config)
+    result = await graph.ainvoke(Command(resume=True), config=config)
+    assert result["operation_status"] == "queued"
+    assert result["support_case_action"] == "not_created"
+    assert len(operations.outbox_commands) == 1
+
+
+async def test_graph_normal_cancellation_connection_still_queues_one_outbox(monkeypatch, case_repository) -> None:
+    graph, operations = _provider_failure_graph(monkeypatch, case_repository, FakeProviderConnectionResolver())
+    config = _run_config("provider-normal-cancellation")
+    await graph.ainvoke({"messages": [HumanMessage(id="provider-normal-cancellation", content="Please cancel ORD-10008.")]}, config=config)
+    result = await graph.ainvoke(Command(resume=True), config=config)
+    assert result["operation_status"] == "queued"
+    assert result["support_case_action"] == "not_created"
+    assert len(operations.outbox_commands) == 1
+
+
+async def test_graph_provider_failure_case_marker_does_not_leak_to_next_turn(monkeypatch, case_repository) -> None:
+    graph, _ = _provider_failure_graph(monkeypatch, case_repository, UnavailableProviderConnectionResolver())
+    config = _run_config("provider-marker-next-turn")
+    await graph.ainvoke({"messages": [HumanMessage(id="provider-marker-one", content="Please return ORD-10001.")]}, config=config)
+    await graph.ainvoke(Command(resume=True), config=config)
+    result = await graph.ainvoke({"messages": [HumanMessage(id="provider-marker-two", content="employee insulted me.")]}, config=config)
+    assert result["support_case_type"] == "staff_conduct_complaint"
+    assert result["provider_failure_case_persisted"] is False
+
+
+async def test_finalize_case_handoff_consumes_provider_failure_case_marker() -> None:
+    """A provider fallback case survives finalization exactly once."""
+    node = build_finalize_case_handoff_node(service_provider=lambda: None)  # type: ignore[arg-type]
+    state = {
+        "provider_failure_case_persisted": True,
+        "support_case_action": "created",
+        "support_case_id": "00000000-0000-0000-0000-000000000001",
+        "support_case_type": "order_operation_review",
+        "support_case_priority": "p1",
+        "support_case_status": "open",
+        "support_case_reason_codes": ["provider_delivery_failed"],
+    }
+    result = await node(state, _run_config("provider-failure-marker-thread"))
+
+    assert result["support_case_action"] == "created"
+    assert result["support_case_id"] == state["support_case_id"]
+    assert result["provider_failure_case_persisted"] is False
 
 
 async def test_graph_rejects_exchange_when_replacement_is_unavailable(refund_graph) -> None:
@@ -857,6 +1066,25 @@ async def test_graph_declines_delivery_investigation_without_creating_case(
     assert result["operation_id"] is None
     assert result["operation_status"] == "cancelled"
     assert result["support_case_action"] == "not_created"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("unexpected resolver value"), RuntimeError("unexpected resolver runtime")],
+)
+async def test_graph_delivery_resolver_unknown_error_propagates(error: Exception) -> None:
+    node = build_finalize_case_handoff_node(
+        service_provider=lambda: None,  # type: ignore[arg-type]
+        connection_resolver_provider=lambda: BrokenProviderConnectionResolver(error),
+    )
+    state = {
+        "domain_case_reason_codes": ["delivery_tracking_stalled"],
+        "operation_extraction": {"delivery_issue_type": "tracking_stalled", "ambiguous": False},
+        "messages": [HumanMessage(id=f"delivery-resolver-{type(error).__name__}", content="Tracking has stalled for ORD-10010.")],
+        "order_id": "ORD-10010",
+    }
+    with pytest.raises(type(error), match="unexpected resolver"):
+        await node(state, _run_config(f"delivery-resolver-{type(error).__name__}"))
 
 
 async def test_graph_lists_support_cases_only_for_the_current_thread(

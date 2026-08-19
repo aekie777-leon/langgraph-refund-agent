@@ -5,6 +5,11 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from agent.auth.models import AccessScope
+from agent.integrations.models import ProviderCommandEnvelope
+from agent.integrations.provider_failure import (
+    ProviderQueueFailureCoordinator,
+    ProviderQueueFailureResult,
+)
 from agent.operations.models import (
     OperationDecision,
     OperationRecordStatus,
@@ -29,12 +34,19 @@ Clock = Callable[[], datetime]
 IdFactory = Callable[[], UUID]
 
 _ACTIVE_STATUSES = frozenset(
-    {"pending_confirmation", "submitted", "processing", "manual_review"}
+    {"pending_confirmation", "queued", "submitted", "processing", "manual_review"}
 )
 _ALLOWED_STATUS_TRANSITIONS: dict[OperationRecordStatus, frozenset[OperationRecordStatus]] = {
     "pending_confirmation": frozenset(
-        {"submitted", "manual_review", "rejected", "cancelled_by_customer"}
+        {
+            "queued",
+            "submitted",
+            "manual_review",
+            "rejected",
+            "cancelled_by_customer",
+        }
     ),
+    "queued": frozenset({"submitted", "manual_review", "rejected"}),
     "submitted": frozenset({"processing", "completed", "rejected"}),
     "processing": frozenset({"completed", "rejected"}),
     "manual_review": frozenset({"processing", "completed", "rejected"}),
@@ -63,6 +75,7 @@ class OperationService:
         clock: Clock = _utc_now,
         id_factory: IdFactory = uuid4,
         max_write_attempts: int = 3,
+        provider_queue_failure_coordinator: ProviderQueueFailureCoordinator | None = None,
     ) -> None:
         """Initialize the service with persistence and deterministic test hooks."""
         if max_write_attempts < 1:
@@ -71,6 +84,18 @@ class OperationService:
         self._clock = clock
         self._id_factory = id_factory
         self._max_write_attempts = max_write_attempts
+        self._provider_queue_failure_coordinator = provider_queue_failure_coordinator
+
+    async def move_to_provider_manual_review(
+        self, scope: AccessScope, *, operation_id: UUID, request_id: str
+    ) -> ProviderQueueFailureResult:
+        """Atomically record confirmed provider-configuration fallback."""
+        request_id, _ = self._validate_request_metadata(request_id, scope.identity)
+        if self._provider_queue_failure_coordinator is None:
+            raise RuntimeError("provider queue failure coordinator is unavailable")
+        return await self._provider_queue_failure_coordinator.move_to_manual_review(
+            scope, operation_id=operation_id, request_id=request_id
+        )
 
     async def get_operation(self, scope: AccessScope, operation_id: UUID) -> OrderOperation:
         """Return one operation or raise when it does not exist."""
@@ -283,6 +308,65 @@ class OperationService:
         raise ConcurrentOperationUpdateError(
             "Could not submit the operation after concurrent write conflicts"
         ) from last_conflict
+
+    async def queue_confirmed_operation(
+        self,
+        scope: AccessScope,
+        *,
+        operation_id: UUID,
+        request_id: str,
+        connection_id: str,
+    ) -> OperationServiceResult:
+        """Queue a confirmed automatic operation and its outbox command atomically."""
+        request_id, _ = self._validate_request_metadata(request_id, scope.identity)
+        normalized_connection_id = connection_id.strip()
+        if not normalized_connection_id:
+            raise ValueError("connection_id must not be empty")
+        current = await self.get_operation(scope, operation_id)
+        if current.requires_manual_review:
+            raise ValueError("manual-review operations must not enter the provider outbox")
+        if current.status == "queued":
+            return OperationServiceResult(action="status_unchanged", operation=current)
+        if current.status != "pending_confirmation":
+            raise InvalidOperationStatusTransition(
+                f"cannot queue an operation in {current.status!r}"
+            )
+        now = self._clock()
+        queued, status_event = self._build_status_update(
+            current=current,
+            target_status="queued",
+            idempotency_key=f"operation:{operation_id}:queued:{request_id}",
+            actor=scope.identity,
+            provider_reference=None,
+        )
+        confirmation_event = OrderOperationEvent(
+            event_id=self._id_factory(),
+            idempotency_key=f"operation:{operation_id}:confirmed:{request_id}",
+            operation_id=current.operation_id,
+            event_type="confirmation_recorded",
+            actor=scope.identity,
+            customer_id=current.customer_id,
+            tenant_id=current.tenant_id,
+            created_at=now,
+        )
+        command = ProviderCommandEnvelope.for_order_operation(
+            operation=queued,
+            connection_id=normalized_connection_id,
+            command_id=self._id_factory(),
+            created_at=now,
+        )
+        await self._repository.queue_operation_with_events_and_command(
+            scope,
+            operation=queued,
+            events=(confirmation_event, status_event),
+            command=command,
+            expected_version=current.version,
+        )
+        return OperationServiceResult(
+            action="queued",
+            operation=queued,
+            events=(confirmation_event, status_event),
+        )
 
     async def cancel_pending_operation(
         self,

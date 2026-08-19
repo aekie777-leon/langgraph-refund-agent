@@ -3,21 +3,36 @@
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
+from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
 from agent.auth.context import require_scope
 from agent.cases.models import (
     CaseServiceResult,
     CaseTrigger,
+    HandoffDecision,
     HandoffPolicyInput,
 )
-from agent.cases.policy import determine_handoff_policy
+from agent.cases.policy import build_display_reason, determine_handoff_policy
 from agent.cases.runtime import get_case_service
 from agent.cases.service import CaseService
-from agent.schemas import SemanticRiskCategory, SemanticRiskLevel
+from agent.integrations.provider import (
+    ProviderConnectionNotFoundError,
+    ProviderConnectionResolver,
+)
+from agent.operations.runtime import (
+    ProviderConfigurationUnavailableError,
+    get_provider_connection_resolver,
+)
+from agent.schemas import (
+    OperationRequestExtraction,
+    SemanticRiskCategory,
+    SemanticRiskLevel,
+)
 from agent.state import RefundState, latest_text_user_message
 
 CaseServiceProvider = Callable[[], CaseService]
+ConnectionResolverProvider = Callable[[], ProviderConnectionResolver]
 AsyncCaseNode = Callable[
     [RefundState, RunnableConfig],
     Awaitable[dict[str, Any]],
@@ -118,6 +133,7 @@ def _case_result_update(result: CaseServiceResult) -> dict[str, Any]:
 
 def build_finalize_case_handoff_node(
     service_provider: CaseServiceProvider = get_case_service,
+    connection_resolver_provider: ConnectionResolverProvider = get_provider_connection_resolver,
 ) -> AsyncCaseNode:
     """Build a final handoff node with an injectable case service."""
 
@@ -125,6 +141,29 @@ def build_finalize_case_handoff_node(
         state: RefundState,
         config: RunnableConfig,
     ) -> dict[str, Any]:
+        # A preceding application transaction may already have created and
+        # linked a support case (for example provider configuration fallback).
+        # It is authoritative; do not let a no-op policy decision erase it or
+        # append a second trigger event.
+        if (
+            state.get("provider_failure_case_persisted") is True
+            and isinstance(state.get("support_case_id"), str)
+            and state.get("support_case_type") == "order_operation_review"
+            and state.get("support_case_priority") == "p1"
+            and state.get("support_case_status") in {"open", "in_progress", "on_hold"}
+            and "provider_delivery_failed" in state.get("support_case_reason_codes", [])
+        ):
+            return {
+                "support_case_action": state.get("support_case_action")
+                or "duplicate_ignored",
+                "support_case_id": state["support_case_id"],
+                "support_case_type": state["support_case_type"],
+                "support_case_priority": state.get("support_case_priority"),
+                "support_case_status": state.get("support_case_status"),
+                "support_case_reason_codes": state.get("support_case_reason_codes", []),
+                "provider_failure_case_persisted": False,
+            }
+
         policy_input = build_handoff_policy_input(state)
         decision = determine_handoff_policy(policy_input)
 
@@ -136,14 +175,62 @@ def build_finalize_case_handoff_node(
                 "support_case_priority": None,
                 "support_case_status": None,
                 "support_case_reason_codes": [],
+                "provider_failure_case_persisted": False,
             }
 
         trigger = build_case_trigger(state, config)
-        result = await service_provider().record_handoff(
-            require_scope(config),
+        service = service_provider()
+        scope = require_scope(config)
+        if decision.case_type != "delivery_investigation":
+            result = await service.record_handoff(scope, trigger=trigger, decision=decision)
+            return {**_case_result_update(result), "provider_failure_case_persisted": False}
+
+        extraction = OperationRequestExtraction.model_validate(
+            state.get("operation_extraction", {})
+        )
+        if extraction.delivery_issue_type is None:
+            raise ValueError("delivery investigation is missing a structured issue type")
+        try:
+            connection = await connection_resolver_provider().resolve(
+                tenant_id=scope.tenant_id,
+                capability="order_operation",
+            )
+        except (
+            ProviderConnectionNotFoundError,
+            ProviderConfigurationUnavailableError,
+        ):
+            safe_decision = HandoffDecision(
+                should_create_case=True,
+                case_type="delivery_investigation",
+                priority="p1",
+                reason_codes=tuple(
+                    dict.fromkeys((*decision.reason_codes, "provider_delivery_failed"))
+                ),
+                display_reason=build_display_reason(
+                    tuple(dict.fromkeys((*decision.reason_codes, "provider_delivery_failed")))
+                ),
+            )
+            result = await service.record_handoff(
+                scope,
+                trigger=trigger,
+                decision=safe_decision,
+            )
+            update = _case_result_update(result)
+            update["provider_failure_case_persisted"] = False
+            update["messages"] = [AIMessage(content="Your delivery request requires human review before it can be processed.")]
+            return update
+        result = await service.record_delivery_investigation(
+            scope,
             trigger=trigger,
             decision=decision,
+            issue_type=extraction.delivery_issue_type,
+            connection_id=connection.connection_id,
         )
-        return _case_result_update(result)
+        update = _case_result_update(result)
+        update["provider_failure_case_persisted"] = False
+        update["messages"] = [
+            AIMessage(content="A delivery investigation has been opened and queued for processing.")
+        ]
+        return update
 
     return finalize_case_handoff
