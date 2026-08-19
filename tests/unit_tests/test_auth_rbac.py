@@ -8,6 +8,7 @@ from agent.auth.rbac import (
     derive_role,
     has_any_permission,
     has_permission,
+    has_provider_operations_permission,
     role_permissions,
 )
 from tests.fakes.identity import make_identity
@@ -28,6 +29,8 @@ def test_role_permissions_are_stable_per_role() -> None:
             "cases:update:assigned",
             "cases:update:all",
             "cases:assign",
+            "provider_ops:read",
+            "provider_ops:redrive",
         }
     )
 
@@ -64,3 +67,57 @@ def test_roles_and_permissions_are_modeled_separately() -> None:
     assert "cases:update:assigned" in ROLE_PERMISSIONS["supervisor"]
     assert derive_role(ROLE_PERMISSIONS["supervisor"]) == "supervisor"
     assert derive_role(ROLE_PERMISSIONS["supervisor"]) != "support_agent"
+
+
+def test_provider_operations_requires_supervisor_and_matching_permission() -> None:
+    supervisor = make_identity("supervisor").scope()
+
+    assert has_provider_operations_permission(supervisor, "provider_ops:read") is True
+    assert (
+        has_provider_operations_permission(supervisor, "provider_ops:redrive") is True
+    )
+
+    missing_read = supervisor.model_copy(
+        update={"permissions": supervisor.permissions - {"provider_ops:read"}}
+    )
+    assert (
+        has_provider_operations_permission(missing_read, "provider_ops:read") is False
+    )
+
+    read_only = supervisor.model_copy(
+        update={"permissions": supervisor.permissions - {"provider_ops:redrive"}}
+    )
+    assert has_provider_operations_permission(read_only, "provider_ops:read") is True
+    assert (
+        has_provider_operations_permission(read_only, "provider_ops:redrive") is False
+    )
+
+    forged_support_agent = (
+        make_identity("support_agent")
+        .scope()
+        .model_copy(
+            update={
+                "permissions": frozenset(
+                    {"cases:read:assigned", "provider_ops:read", "provider_ops:redrive"}
+                )
+            }
+        )
+    )
+    assert (
+        has_provider_operations_permission(forged_support_agent, "provider_ops:read")
+        is False
+    )
+    assert (
+        has_provider_operations_permission(forged_support_agent, "provider_ops:redrive")
+        is False
+    )
+
+
+def test_derive_role_rejects_pre_provider_ops_supervisor_permission_set() -> None:
+    previous_supervisor_permissions = ROLE_PERMISSIONS["supervisor"] - {
+        "provider_ops:read",
+        "provider_ops:redrive",
+    }
+
+    with pytest.raises(ValueError):
+        derive_role(previous_supervisor_permissions)

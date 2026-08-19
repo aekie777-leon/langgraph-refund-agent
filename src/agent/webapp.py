@@ -15,6 +15,16 @@ from agent.database import create_async_connection_pool
 from agent.integrations.connection_resolver import EnvironmentProviderConnectionResolver
 from agent.integrations.postgres_repository import PostgresIntegrationRepository
 from agent.integrations.provider_failure import PostgresProviderQueueFailureCoordinator
+from agent.integrations.provider_operations_api import (
+    router as provider_operations_router,
+)
+from agent.integrations.provider_operations_api_errors import (
+    register_provider_operations_exception_handlers,
+)
+from agent.integrations.provider_operations_postgres import (
+    PostgresProviderOperationsRepository,
+)
+from agent.integrations.provider_operations_service import ProviderOperationsService
 from agent.integrations.webhook_adapter import CanonicalHmacWebhookAdapter
 from agent.integrations.webhook_resolver import (
     EnvironmentProviderWebhookConnectionResolver,
@@ -40,6 +50,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         await pool.wait()
         _app.state.integration_repository = PostgresIntegrationRepository(pool)
+        _app.state.provider_operations_service = ProviderOperationsService(
+            PostgresProviderOperationsRepository(pool)
+        )
         _app.state.provider_webhook_resolver = (
             EnvironmentProviderWebhookConnectionResolver.from_environment()
         )
@@ -49,7 +62,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             order_provider=DemoOrderProvider(),
             operation_service=OperationService(
                 PostgresOrderOperationRepository(pool),
-                provider_queue_failure_coordinator=PostgresProviderQueueFailureCoordinator(pool),
+                provider_queue_failure_coordinator=PostgresProviderQueueFailureCoordinator(
+                    pool
+                ),
             ),
             provider_connection_resolver=(
                 EnvironmentProviderConnectionResolver.from_environment(
@@ -68,14 +83,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             clear_operation_dependencies()
             clear_case_service()
     finally:
+        if hasattr(_app.state, "provider_operations_service"):
+            delattr(_app.state, "provider_operations_service")
         await pool.close()
 
 
 app = FastAPI(
     title="OpsPilot Internal API",
-    version="0.7.0",
+    version="0.8.0",
     lifespan=lifespan,
 )
 app.include_router(support_case_router)
+app.include_router(provider_operations_router)
 app.include_router(provider_webhook_router)
 register_case_exception_handlers(app)
+register_provider_operations_exception_handlers(app)

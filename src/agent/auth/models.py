@@ -6,6 +6,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Role = Literal["customer", "support_agent", "supervisor"]
 
+ProviderOperationsPermission = Literal[
+    "provider_ops:read",
+    "provider_ops:redrive",
+]
+
 Permission = Literal[
     "orders:read:own",
     "orders:operate:own",
@@ -15,6 +20,8 @@ Permission = Literal[
     "cases:update:assigned",
     "cases:update:all",
     "cases:assign",
+    "provider_ops:read",
+    "provider_ops:redrive",
 ]
 
 _IDENTITY_SEPARATOR = ":"

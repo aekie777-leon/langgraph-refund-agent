@@ -1,6 +1,11 @@
 """Map roles to permissions and answer deterministic authorization questions."""
 
-from agent.auth.models import AccessScope, Permission, Role
+from agent.auth.models import (
+    AccessScope,
+    Permission,
+    ProviderOperationsPermission,
+    Role,
+)
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
     "customer": frozenset({"orders:read:own", "orders:operate:own", "cases:read:own"}),
@@ -13,6 +18,8 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             "cases:update:assigned",
             "cases:update:all",
             "cases:assign",
+            "provider_ops:read",
+            "provider_ops:redrive",
         }
     ),
 }
@@ -31,6 +38,14 @@ def has_permission(scope: AccessScope, permission: Permission) -> bool:
 def has_any_permission(scope: AccessScope, *permissions: Permission) -> bool:
     """Return whether the scope grants any of the requested permissions."""
     return any(permission in scope.permissions for permission in permissions)
+
+
+def has_provider_operations_permission(
+    scope: AccessScope,
+    permission: ProviderOperationsPermission,
+) -> bool:
+    """Require both the supervisor role and one explicit Provider permission."""
+    return scope.role == "supervisor" and permission in scope.permissions
 
 
 def derive_role(permissions: frozenset[Permission]) -> Role:

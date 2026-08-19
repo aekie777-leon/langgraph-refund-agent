@@ -30,6 +30,12 @@ CaseEventType = Literal[
     "status_changed",
     "assigned",
     "provider_update",
+    "provider_redrive",
+]
+ProviderRedriveReasonCode = Literal[
+    "dependency_or_configuration_restored",
+    "transient_incident_resolved",
+    "manual_retry_approved",
 ]
 CaseServiceAction = Literal[
     "not_created",
@@ -258,9 +264,7 @@ class SupportCase(BaseModel):
         if self.status != "on_hold" and self.on_hold_reason is not None:
             raise ValueError("on_hold_reason is only allowed when status is 'on_hold'")
         if self.case_type == "delivery_investigation" and self.order_id is None:
-            raise ValueError(
-                "delivery_investigation cases require an order_id"
-            )
+            raise ValueError("delivery_investigation cases require an order_id")
         return self
 
 
@@ -293,6 +297,7 @@ class SupportCaseEvent(BaseModel):
     provider_command_id: UUID | None = None
     provider_command_status: ProviderCommandExecutionStatus | None = None
     provider_reference: str | None = Field(default=None, min_length=1)
+    provider_redrive_reason_code: ProviderRedriveReasonCode | None = None
     actor: str | None = None
     customer_id: str = Field(min_length=1)
     tenant_id: str = Field(min_length=1)
@@ -301,6 +306,13 @@ class SupportCaseEvent(BaseModel):
     @model_validator(mode="after")
     def validate_event_fields(self) -> Self:
         """Require the fields needed by each event type."""
+        if (
+            self.event_type != "provider_redrive"
+            and self.provider_redrive_reason_code is not None
+        ):
+            raise ValueError(
+                "only provider_redrive events may carry a redrive reason"
+            )
         if self.event_type in ("case_created", "trigger_appended"):
             if self.source_message_id is None:
                 raise ValueError("source_message_id is required for trigger events")
@@ -340,6 +352,30 @@ class SupportCaseEvent(BaseModel):
                 raise ValueError(
                     "provider_update events must not carry case status fields"
                 )
+            return self
+
+        if self.event_type == "provider_redrive":
+            if self.provider_command_id is None:
+                raise ValueError(
+                    "provider_command_id is required for provider_redrive events"
+                )
+            if self.provider_redrive_reason_code is None:
+                raise ValueError(
+                    "provider_redrive_reason_code is required for provider_redrive events"
+                )
+            if (
+                self.provider_command_status is not None
+                or self.provider_reference is not None
+            ):
+                raise ValueError(
+                    "provider_redrive events must not carry provider result fields"
+                )
+            if self.previous_status is not None or self.current_status is not None:
+                raise ValueError(
+                    "provider_redrive events must not carry case status fields"
+                )
+            if not self.actor:
+                raise ValueError("actor is required for provider_redrive events")
             return self
 
         if self.previous_status is None or self.current_status is None:

@@ -35,6 +35,8 @@ _ROLE_PERMISSIONS = {
         "cases:update:assigned",
         "cases:update:all",
         "cases:assign",
+        "provider_ops:read",
+        "provider_ops:redrive",
     ],
 }
 

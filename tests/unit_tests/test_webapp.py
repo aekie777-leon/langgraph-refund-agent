@@ -7,6 +7,10 @@ import pytest
 from agent import webapp
 from agent.cases.service import CaseService
 from agent.integrations.postgres_repository import PostgresIntegrationRepository
+from agent.integrations.provider_operations_postgres import (
+    PostgresProviderOperationsRepository,
+)
+from agent.integrations.provider_operations_service import ProviderOperationsService
 from agent.integrations.webhook_adapter import CanonicalHmacWebhookAdapter
 from agent.integrations.webhook_resolver import (
     EnvironmentProviderWebhookConnectionResolver,
@@ -76,10 +80,18 @@ async def test_lifespan_opens_configures_and_closes_resources(
         assert isinstance(
             webapp.app.state.provider_webhook_adapter, CanonicalHmacWebhookAdapter
         )
+        provider_operations_service = webapp.app.state.provider_operations_service
+        assert isinstance(provider_operations_service, ProviderOperationsService)
+        assert isinstance(
+            provider_operations_service._repository,
+            PostgresProviderOperationsRepository,
+        )
+        assert provider_operations_service._repository._pool is pool
         assert cleared == []
 
     assert pool.calls == ["open", "wait", "close"]
     assert cleared == [True]
+    assert not hasattr(webapp.app.state, "provider_operations_service")
 
 
 def test_production_app_registers_the_provider_webhook_route() -> None:
@@ -91,6 +103,32 @@ def test_production_app_registers_the_provider_webhook_route() -> None:
             getattr(included_router, "original_router", included_router), "routes", []
         )
     )
+
+
+def test_production_app_reports_v080() -> None:
+    assert webapp.app.version == "0.8.0"
+
+
+def test_production_app_preserves_case_routes_and_adds_exact_provider_ops_routes() -> (
+    None
+):
+    paths = {
+        getattr(route, "path", None)
+        for included_router in webapp.app.routes
+        for route in getattr(
+            getattr(included_router, "original_router", included_router), "routes", []
+        )
+    }
+
+    assert "/internal/support-cases" in paths
+    assert "/internal/support-cases/{case_id}" in paths
+    assert {
+        "/internal/provider-operations/queues",
+        "/internal/provider-operations/outbox/{command_id}",
+        "/internal/provider-operations/inbox/{inbox_id}",
+        "/internal/provider-operations/outbox/{command_id}/redrives",
+        "/internal/provider-operations/inbox/{inbox_id}/redrives",
+    }.issubset(paths)
 
 
 async def test_lifespan_closes_an_open_pool_when_initialization_fails(

@@ -135,7 +135,7 @@ class PostgresInboxFinalizer:
                             return await self._retry_or_fail(
                                 cursor,
                                 claimed,
-                                inbox.processing_attempts,
+                                inbox.attempts_in_cycle,
                                 now,
                                 retry_available_at,
                             )
@@ -194,7 +194,7 @@ class PostgresInboxFinalizer:
                                 incoming_reference or operation.provider_reference
                             )
                             await cursor.execute(
-                                "UPDATE case_management.order_operations SET status=%s, provider_reference=%s, updated_at=%s, version=%s WHERE operation_id=%s AND version=%s",
+                                "UPDATE case_management.order_operations SET status=%s, provider_reference=%s, updated_at=GREATEST(%s, updated_at, created_at), version=%s WHERE operation_id=%s AND version=%s",
                                 (
                                     decision.target_status,
                                     reference,
@@ -236,7 +236,7 @@ class PostgresInboxFinalizer:
                             and incoming_reference is not None
                         ):
                             await cursor.execute(
-                                "UPDATE case_management.order_operations SET provider_reference=%s, updated_at=%s, version=%s WHERE operation_id=%s AND version=%s",
+                                "UPDATE case_management.order_operations SET provider_reference=%s, updated_at=GREATEST(%s, updated_at, created_at), version=%s WHERE operation_id=%s AND version=%s",
                                 (
                                     incoming_reference,
                                     now,
@@ -343,7 +343,7 @@ class PostgresInboxFinalizer:
                             return await self._retry_or_fail(
                                 cursor,
                                 claimed,
-                                inbox.processing_attempts,
+                                inbox.attempts_in_cycle,
                                 now,
                                 retry_available_at,
                                 aggregate_type="support_case",
@@ -402,7 +402,7 @@ class PostgresInboxFinalizer:
                         )
                         await cursor.execute(
                             f"INSERT INTO case_management.support_case_events "
-                            f"({_CASE_EVENT_COLUMNS}) VALUES ({', '.join(['%s'] * 24)})",
+                            f"({_CASE_EVENT_COLUMNS}) VALUES ({', '.join(['%s'] * 25)})",
                             _case_event_values(provider_update),
                         )
                         await self._process(cursor, claimed, now)
@@ -436,7 +436,7 @@ class PostgresInboxFinalizer:
         ):
             raise LeaseConflictError(str(claimed.inbox_id))
         await cursor.execute(
-            "SELECT attempt_id, attempt_number, inbox_id, lease_id, worker_id "
+            "SELECT attempt_id, processing_cycle, attempt_number, inbox_id, lease_id, worker_id, started_at "
             "FROM integration.inbox_processing_attempts WHERE attempt_id=%s "
             "AND inbox_id=%s AND lease_id=%s AND worker_id=%s AND finished_at IS NULL",
             (
@@ -449,14 +449,25 @@ class PostgresInboxFinalizer:
         attempt = await cursor.fetchone()
         if (
             attempt is None
+            or persisted.processing_cycle != claimed.processing_cycle
+            or persisted.processing_attempts != claimed.processing_attempts
+            or persisted.attempts_in_cycle != claimed.attempts_in_cycle
+            or attempt["processing_cycle"] != persisted.processing_cycle
+            or attempt["processing_cycle"] != claimed.attempt.processing_cycle
             or attempt["attempt_number"] != persisted.processing_attempts
+            or attempt["attempt_number"] != claimed.attempt.attempt_number
             or attempt["attempt_id"] != claimed.attempt.attempt_id
             or attempt["inbox_id"] != persisted.inbox_id
             or attempt["lease_id"] != persisted.lease_id
             or attempt["worker_id"] != persisted.lease_owner
         ):
             raise LeaseConflictError(str(claimed.inbox_id))
-        return persisted, now
+        return persisted, max(
+            now,
+            persisted.received_at,
+            persisted.updated_at,
+            attempt["started_at"],
+        )
 
     @staticmethod
     def _payload_association_matches(inbox) -> bool:
@@ -534,12 +545,12 @@ class PostgresInboxFinalizer:
         self,
         cursor,
         claimed,
-        processing_attempts,
+        attempts_in_cycle,
         now,
         available_at,
         aggregate_type="order_operation",
     ):
-        if processing_attempts >= 5:
+        if attempts_in_cycle >= 5:
             return await self._fail(
                 cursor,
                 claimed,

@@ -36,6 +36,7 @@ htmlcov/
 
 # Build outputs
 build/
+buildout/
 dist/
 
 # Development-only files

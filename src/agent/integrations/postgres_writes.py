@@ -151,7 +151,7 @@ async def update_outbox_transition(
         _require_aware(dead_at, "dead_at")
     sets = [
         "status = %s",
-        "updated_at = %s",
+        "updated_at = GREATEST(%s, updated_at, created_at)",
         "lease_id = NULL",
         "lease_owner = NULL",
         "lease_expires_at = NULL",
@@ -161,10 +161,10 @@ async def update_outbox_transition(
         sets.append("available_at = %s")
         parameters.append(available_at)
     if published_at is not None:
-        sets.append("published_at = %s")
+        sets.append("published_at = GREATEST(%s, updated_at, created_at)")
         parameters.append(published_at)
     if dead_at is not None:
-        sets.append("dead_at = %s")
+        sets.append("dead_at = GREATEST(%s, updated_at, created_at)")
         parameters.append(dead_at)
     if attempts_in_cycle is not None:
         sets.append("attempts_in_cycle = %s")
@@ -227,7 +227,8 @@ async def finish_delivery_attempt(
     result = await executable.execute(
         """
         UPDATE integration.outbox_delivery_attempts
-        SET finished_at = %s, outcome = %s, failure_kind = %s, http_status = %s,
+        SET finished_at = GREATEST(%s, started_at), outcome = %s,
+            failure_kind = %s, http_status = %s,
             provider_operation_id = %s, provider_reference = %s,
             safe_error_code = %s, safe_error_message = %s,
             retry_after_seconds = %s, next_available_at = %s
@@ -267,7 +268,9 @@ async def mark_inbox_processed(
     result = await executable.execute(
         """
         UPDATE integration.inbox_messages
-        SET status = 'processed', processed_at = %s, updated_at = %s,
+        SET status = 'processed',
+            processed_at = GREATEST(%s, updated_at, received_at),
+            updated_at = GREATEST(%s, updated_at, received_at),
             lease_id = NULL, lease_owner = NULL, lease_expires_at = NULL
         WHERE inbox_id = %s AND lease_id = %s AND lease_owner = %s
           AND status = 'processing'
@@ -299,7 +302,7 @@ async def finish_inbox_attempt(
     result = await executable.execute(
         """
         UPDATE integration.inbox_processing_attempts
-        SET finished_at = %s, outcome = %s,
+        SET finished_at = GREATEST(%s, started_at), outcome = %s,
             safe_error_code = %s, safe_error_message = %s
         WHERE attempt_id = %s AND inbox_id = %s AND lease_id = %s
           AND worker_id = %s AND finished_at IS NULL
@@ -334,7 +337,9 @@ async def mark_inbox_failed(
     result = await executable.execute(
         """
         UPDATE integration.inbox_messages
-        SET status = 'failed', failed_at = %s, updated_at = %s,
+        SET status = 'failed',
+            failed_at = GREATEST(%s, updated_at, received_at),
+            updated_at = GREATEST(%s, updated_at, received_at),
             lease_id = NULL, lease_owner = NULL, lease_expires_at = NULL,
             last_error_code = %s, last_error_message = %s
         WHERE inbox_id = %s AND lease_id = %s AND lease_owner = %s
@@ -371,7 +376,8 @@ async def schedule_inbox_retry(
     result = await executable.execute(
         """
         UPDATE integration.inbox_messages
-        SET status = 'received', available_at = %s, updated_at = %s,
+        SET status = 'received', available_at = %s,
+            updated_at = GREATEST(%s, updated_at, received_at),
             lease_id = NULL, lease_owner = NULL, lease_expires_at = NULL,
             last_error_code = %s, last_error_message = %s
         WHERE inbox_id = %s AND lease_id = %s AND lease_owner = %s

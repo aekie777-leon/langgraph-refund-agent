@@ -10,7 +10,6 @@ from agent.integrations.persistence_models import (
     ClaimedOutboxMessage,
     InboxMessage,
     OutboxMessage,
-    OutboxRedrive,
 )
 
 
@@ -36,18 +35,6 @@ class OutboxAttemptsExhaustedError(RuntimeError):
 
 class InboxAttemptsExhaustedError(RuntimeError):
     """Report an attempt to schedule a sixth Inbox processing attempt."""
-
-
-class DuplicateRedriveRequestError(RuntimeError):
-    """Report that the same redrive request_id was already applied."""
-
-
-class InvalidRedriveStateError(ValueError):
-    """Report that a redrive was requested for a non-dead outbox message."""
-
-
-class OutboxMessageNotFoundError(LookupError):
-    """Report that the requested outbox command does not exist."""
 
 
 class IntegrationRepository(Protocol):
@@ -112,20 +99,6 @@ class IntegrationRepository(Protocol):
         ``OutboxAttemptsExhaustedError`` when the cycle already consumed its
         8 attempts.
         """
-        ...
-
-    async def redrive_dead_outbox(
-        self,
-        *,
-        command_id: UUID,
-        tenant_id: str,
-        request_id: str,
-        requested_by: str,
-        reason: str,
-        redrive_id: UUID,
-        created_at: datetime,
-    ) -> OutboxRedrive:
-        """Manually redrive a dead outbox command into a fresh delivery cycle."""
         ...
 
     async def get_inbox_message(self, inbox_id: UUID) -> InboxMessage | None:
@@ -194,8 +167,14 @@ class IntegrationRepository(Protocol):
         ...
 
     async def schedule_inbox_retry(
-        self, *, inbox_id: UUID, lease_id: UUID, lease_owner: str,
-        attempt_id: UUID, next_available_at: datetime, error_code: str | None,
+        self,
+        *,
+        inbox_id: UUID,
+        lease_id: UUID,
+        lease_owner: str,
+        attempt_id: UUID,
+        next_available_at: datetime,
+        error_code: str | None,
         error_message: str | None,
     ) -> None:
         """Finish one fenced attempt and make its Inbox message due again."""

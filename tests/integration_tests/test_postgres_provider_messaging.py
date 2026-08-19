@@ -30,9 +30,7 @@ from agent.integrations.postgres_writes import (
     update_outbox_transition,
 )
 from agent.integrations.repository import (
-    DuplicateRedriveRequestError,
     InboxEventConflictError,
-    InvalidRedriveStateError,
     LeaseConflictError,
     OutboxAttemptsExhaustedError,
 )
@@ -95,6 +93,10 @@ async def postgres_context() -> AsyncIterator[tuple[AsyncConnectionPool, str]]:
             )
             await connection.execute(
                 "DELETE FROM integration.outbox_redrives WHERE tenant_id LIKE %s",
+                (f"{prefix}%",),
+            )
+            await connection.execute(
+                "DELETE FROM integration.inbox_redrives WHERE tenant_id LIKE %s",
                 (f"{prefix}%",),
             )
             await connection.execute(
@@ -265,7 +267,7 @@ def _webhook_event(*, command_id: UUID) -> ProviderWebhookEventData:
     )
 
 
-async def test_migration_0007_creates_integration_schema(
+async def test_provider_migrations_create_integration_schema(
     postgres_context: tuple[AsyncConnectionPool, str],
 ) -> None:
     pool, _prefix = postgres_context
@@ -284,6 +286,7 @@ async def test_migration_0007_creates_integration_schema(
     assert names == [
         "inbox_messages",
         "inbox_processing_attempts",
+        "inbox_redrives",
         "outbox_delivery_attempts",
         "outbox_messages",
         "outbox_redrives",
@@ -360,7 +363,9 @@ async def test_outbox_unique_failure_rolls_back_operation(
         order_id="ORD-10002",
         source_message_id="message-outbox-2",
     )
-    await operation_repo.create_operation_with_events(scope, operation=second, events=())
+    await operation_repo.create_operation_with_events(
+        scope, operation=second, events=()
+    )
     queued_second = second.model_copy(
         update={"status": "queued", "version": second.version + 1}
     )
@@ -864,176 +869,6 @@ async def test_attempts_in_cycle_increment_and_dead_after_eight(
     assert message.attempts_in_cycle == 8
 
 
-async def test_redrive_opens_new_cycle_and_preserves_idempotency_key(
-    postgres_context: tuple[AsyncConnectionPool, str],
-) -> None:
-    pool, tenant_id = postgres_context
-    scope = _scope(tenant_id)
-    operation_repo = PostgresOrderOperationRepository(pool)
-    integration_repo = PostgresIntegrationRepository(pool)
-    created = _operation(tenant_id=tenant_id)
-    await operation_repo.create_operation_with_events(
-        scope,
-        operation=created,
-        events=(),
-    )
-    queued = created.model_copy(
-        update={"status": "queued", "version": created.version + 1}
-    )
-    command = _envelope(queued)
-    await operation_repo.queue_operation_with_events_and_command(
-        scope,
-        operation=queued,
-        events=(_queued_event(queued),),
-        command=command,
-        expected_version=created.version,
-    )
-    current = (
-        await integration_repo.claim_due_outbox(
-            worker_id="worker-1", batch_size=10, lease_seconds=90
-        )
-    )[0]
-    async with pool.connection() as connection:
-        async with connection.transaction():
-            async with connection.cursor() as cursor:
-                await cursor.execute("SELECT clock_timestamp() AS now")
-                now = (await cursor.fetchone())[0]
-                await finish_delivery_attempt(
-                    cursor,
-                    attempt_id=current.attempt.attempt_id,
-                    command_id=current.command_id,
-                    lease_id=current.lease_id,
-                    worker_id=current.lease_owner,
-                    finished_at=now,
-                    outcome="terminal_failure",
-                    failure_kind="validation_error",
-                    safe_error_code="bad_payload",
-                    safe_error_message="invalid",
-                )
-                await update_outbox_transition(
-                    cursor,
-                    command_id=current.command_id,
-                    expected_status="processing",
-                    expected_lease_id=current.lease_id,
-                    expected_lease_owner=current.lease_owner,
-                    target_status="dead",
-                    updated_at=now,
-                    dead_at=now,
-                )
-
-    redrive = await integration_repo.redrive_dead_outbox(
-        command_id=current.command_id,
-        tenant_id=tenant_id,
-        request_id="redrive-1",
-        requested_by="sup-1",
-        reason="provider recovered",
-        redrive_id=uuid4(),
-        created_at=NOW,
-    )
-
-    assert redrive.previous_cycle == 1
-    assert redrive.new_cycle == 2
-    message = await integration_repo.get_outbox_message(current.command_id)
-    assert message is not None
-    assert message.status == "retry_scheduled"
-    assert message.delivery_cycle == 2
-    assert message.attempts_in_cycle == 0
-    assert message.dead_at is None
-    assert message.idempotency_key == command.idempotency_key
-
-
-async def test_redrive_rejects_duplicate_request_and_non_dead_state(
-    postgres_context: tuple[AsyncConnectionPool, str],
-) -> None:
-    pool, tenant_id = postgres_context
-    scope = _scope(tenant_id)
-    operation_repo = PostgresOrderOperationRepository(pool)
-    integration_repo = PostgresIntegrationRepository(pool)
-    created = _operation(tenant_id=tenant_id)
-    await operation_repo.create_operation_with_events(
-        scope,
-        operation=created,
-        events=(),
-    )
-    queued = created.model_copy(
-        update={"status": "queued", "version": created.version + 1}
-    )
-    command = _envelope(queued)
-    await operation_repo.queue_operation_with_events_and_command(
-        scope,
-        operation=queued,
-        events=(_queued_event(queued),),
-        command=command,
-        expected_version=created.version,
-    )
-
-    # The outbox command_id is the envelope's command id, never the
-    # operation_id.
-    with pytest.raises(InvalidRedriveStateError):
-        await integration_repo.redrive_dead_outbox(
-            command_id=command.command_id,
-            tenant_id=tenant_id,
-            request_id="redrive-1",
-            requested_by="sup-1",
-            reason="too early",
-            redrive_id=uuid4(),
-            created_at=NOW,
-        )
-
-    current = (
-        await integration_repo.claim_due_outbox(
-            worker_id="worker-1", batch_size=10, lease_seconds=90
-        )
-    )[0]
-    async with pool.connection() as connection:
-        async with connection.transaction():
-            async with connection.cursor() as cursor:
-                await cursor.execute("SELECT clock_timestamp() AS now")
-                now = (await cursor.fetchone())[0]
-                await finish_delivery_attempt(
-                    cursor,
-                    attempt_id=current.attempt.attempt_id,
-                    command_id=current.command_id,
-                    lease_id=current.lease_id,
-                    worker_id=current.lease_owner,
-                    finished_at=now,
-                    outcome="terminal_failure",
-                    failure_kind="validation_error",
-                    safe_error_code="bad_payload",
-                    safe_error_message="invalid",
-                )
-                await update_outbox_transition(
-                    cursor,
-                    command_id=current.command_id,
-                    expected_status="processing",
-                    expected_lease_id=current.lease_id,
-                    expected_lease_owner=current.lease_owner,
-                    target_status="dead",
-                    updated_at=now,
-                    dead_at=now,
-                )
-
-    await integration_repo.redrive_dead_outbox(
-        command_id=current.command_id,
-        tenant_id=tenant_id,
-        request_id="redrive-1",
-        requested_by="sup-1",
-        reason="provider recovered",
-        redrive_id=uuid4(),
-        created_at=NOW,
-    )
-    with pytest.raises(DuplicateRedriveRequestError):
-        await integration_repo.redrive_dead_outbox(
-            command_id=current.command_id,
-            tenant_id=tenant_id,
-            request_id="redrive-1",
-            requested_by="sup-1",
-            reason="provider recovered again",
-            redrive_id=uuid4(),
-            created_at=NOW,
-        )
-
-
 async def test_webhook_receive_is_idempotent_by_event_id(
     postgres_context: tuple[AsyncConnectionPool, str],
 ) -> None:
@@ -1284,9 +1119,7 @@ async def test_operation_association_mismatches_produce_no_writes(
     pool, tenant_id = postgres_context
     scope = _scope(tenant_id)
     operation_repo = PostgresOrderOperationRepository(pool)
-    queued, command = await _persist_pending_operation(
-        operation_repo, scope, tenant_id
-    )
+    queued, command = await _persist_pending_operation(operation_repo, scope, tenant_id)
 
     other_id = uuid4()
     mismatches = [
@@ -1300,7 +1133,9 @@ async def test_operation_association_mismatches_produce_no_writes(
         ),
         command.model_copy(update={"tenant_id": f"{tenant_id}-other"}),
         command.model_copy(
-            update={"payload": command.payload.model_copy(update={"order_id": "ORD-99999"})}
+            update={
+                "payload": command.payload.model_copy(update={"order_id": "ORD-99999"})
+            }
         ),
         command.model_copy(update={"expected_order_version": 1}),
     ]
@@ -1379,7 +1214,9 @@ async def test_case_association_mismatches_produce_no_writes(
         ),
         command.model_copy(update={"tenant_id": f"{tenant_id}-other"}),
         command.model_copy(
-            update={"payload": command.payload.model_copy(update={"order_id": "ORD-99999"})}
+            update={
+                "payload": command.payload.model_copy(update={"order_id": "ORD-99999"})
+            }
         ),
         # A tampered command_type fails the envelope revalidation.
         command.model_copy(update={"command_type": "return_order"}),
@@ -1552,7 +1389,9 @@ async def test_active_operation_uniqueness_is_tenant_scoped(
         order_id="ORD-50001",
         source_message_id="message-active-1",
     )
-    await operation_repo.create_operation_with_events(scope_a, operation=first, events=())
+    await operation_repo.create_operation_with_events(
+        scope_a, operation=first, events=()
+    )
     with pytest.raises(ActiveOrderOperationConflictError):
         await operation_repo.create_operation_with_events(
             scope_a,
@@ -1570,7 +1409,9 @@ async def test_active_operation_uniqueness_is_tenant_scoped(
         order_id="ORD-50001",
         source_message_id="message-active-1",
     )
-    await operation_repo.create_operation_with_events(scope_b, operation=second, events=())
+    await operation_repo.create_operation_with_events(
+        scope_b, operation=second, events=()
+    )
     assert await operation_repo.get_operation(scope_b, second.operation_id) is not None
 
 
@@ -1581,16 +1422,16 @@ async def test_historical_terminal_operations_do_not_block_new_active(
     scope = _scope(tenant_id)
     operation_repo = PostgresOrderOperationRepository(pool)
 
-    for index, status in enumerate(
-        ("completed", "rejected", "cancelled_by_customer")
-    ):
+    for index, status in enumerate(("completed", "rejected", "cancelled_by_customer")):
         old = _operation(
             tenant_id=tenant_id,
             order_id="ORD-60001",
             source_message_id=f"message-hist-{index}",
             status=status,
         )
-        await operation_repo.create_operation_with_events(scope, operation=old, events=())
+        await operation_repo.create_operation_with_events(
+            scope, operation=old, events=()
+        )
 
     fresh = _operation(
         tenant_id=tenant_id,
@@ -1777,9 +1618,7 @@ async def test_ninth_attempt_is_impossible_and_eighth_retry_rejected(
     scope = _scope(tenant_id)
     operation_repo = PostgresOrderOperationRepository(pool)
     integration_repo = PostgresIntegrationRepository(pool)
-    queued, command = await _persist_pending_operation(
-        operation_repo, scope, tenant_id
-    )
+    queued, command = await _persist_pending_operation(operation_repo, scope, tenant_id)
     await operation_repo.queue_operation_with_events_and_command(
         scope,
         operation=queued,
@@ -1858,9 +1697,7 @@ async def test_seventh_lease_expiry_recovers_to_retry_scheduled(
     scope = _scope(tenant_id)
     operation_repo = PostgresOrderOperationRepository(pool)
     integration_repo = PostgresIntegrationRepository(pool)
-    queued, command = await _persist_pending_operation(
-        operation_repo, scope, tenant_id
-    )
+    queued, command = await _persist_pending_operation(operation_repo, scope, tenant_id)
     await operation_repo.queue_operation_with_events_and_command(
         scope,
         operation=queued,
@@ -1909,9 +1746,7 @@ async def test_eighth_lease_expiry_goes_dead(
     scope = _scope(tenant_id)
     operation_repo = PostgresOrderOperationRepository(pool)
     integration_repo = PostgresIntegrationRepository(pool)
-    queued, command = await _persist_pending_operation(
-        operation_repo, scope, tenant_id
-    )
+    queued, command = await _persist_pending_operation(operation_repo, scope, tenant_id)
     await operation_repo.queue_operation_with_events_and_command(
         scope,
         operation=queued,
@@ -1965,78 +1800,6 @@ async def test_eighth_lease_expiry_goes_dead(
     assert rows[1] == "lease_expired_attempts_exhausted"
 
 
-async def test_redrive_starts_new_cycle_at_attempt_one(
-    postgres_context: tuple[AsyncConnectionPool, str],
-) -> None:
-    pool, tenant_id = postgres_context
-    scope = _scope(tenant_id)
-    operation_repo = PostgresOrderOperationRepository(pool)
-    integration_repo = PostgresIntegrationRepository(pool)
-    queued, command = await _persist_pending_operation(
-        operation_repo, scope, tenant_id
-    )
-    await operation_repo.queue_operation_with_events_and_command(
-        scope,
-        operation=queued,
-        events=(_queued_event(queued),),
-        command=command,
-        expected_version=1,
-    )
-    current = (
-        await integration_repo.claim_due_outbox(
-            worker_id="worker-1", batch_size=10, lease_seconds=90
-        )
-    )[0]
-    async with pool.connection() as connection:
-        async with connection.transaction():
-            async with connection.cursor() as cursor:
-                await cursor.execute("SELECT clock_timestamp() AS now")
-                now = (await cursor.fetchone())[0]
-                await finish_delivery_attempt(
-                    cursor,
-                    attempt_id=current.attempt.attempt_id,
-                    command_id=current.command_id,
-                    lease_id=current.lease_id,
-                    worker_id=current.lease_owner,
-                    finished_at=now,
-                    outcome="terminal_failure",
-                    failure_kind="validation_error",
-                    safe_error_code="bad_payload",
-                    safe_error_message="invalid",
-                )
-                await update_outbox_transition(
-                    cursor,
-                    command_id=current.command_id,
-                    expected_status="processing",
-                    expected_lease_id=current.lease_id,
-                    expected_lease_owner=current.lease_owner,
-                    target_status="dead",
-                    updated_at=now,
-                    dead_at=now,
-                )
-    redrive = await integration_repo.redrive_dead_outbox(
-        command_id=current.command_id,
-        tenant_id=tenant_id,
-        request_id="redrive-cycle-1",
-        requested_by="sup-1",
-        reason="provider recovered",
-        redrive_id=uuid4(),
-        created_at=NOW,
-    )
-    assert redrive.new_cycle == 2
-
-    claimed = (
-        await integration_repo.claim_due_outbox(
-            worker_id="worker-1", batch_size=10, lease_seconds=90
-        )
-    )[0]
-    assert claimed.attempt.attempt_number == 1
-    assert claimed.delivery_cycle == 2
-    message = await integration_repo.get_outbox_message(current.command_id)
-    assert message is not None
-    assert message.idempotency_key == command.idempotency_key
-
-
 async def test_error_field_bounds_rejected_without_partial_state(
     postgres_context: tuple[AsyncConnectionPool, str],
 ) -> None:
@@ -2044,9 +1807,7 @@ async def test_error_field_bounds_rejected_without_partial_state(
     scope = _scope(tenant_id)
     operation_repo = PostgresOrderOperationRepository(pool)
     integration_repo = PostgresIntegrationRepository(pool)
-    queued, command = await _persist_pending_operation(
-        operation_repo, scope, tenant_id
-    )
+    queued, command = await _persist_pending_operation(operation_repo, scope, tenant_id)
     await operation_repo.queue_operation_with_events_and_command(
         scope,
         operation=queued,
@@ -2099,9 +1860,7 @@ async def test_renew_after_lease_expiry_returns_false(
     scope = _scope(tenant_id)
     operation_repo = PostgresOrderOperationRepository(pool)
     integration_repo = PostgresIntegrationRepository(pool)
-    queued, command = await _persist_pending_operation(
-        operation_repo, scope, tenant_id
-    )
+    queued, command = await _persist_pending_operation(operation_repo, scope, tenant_id)
     await operation_repo.queue_operation_with_events_and_command(
         scope,
         operation=queued,

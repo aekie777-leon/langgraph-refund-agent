@@ -2,7 +2,22 @@
 
 A small, risk-aware customer-service assistant built with LangGraph. It classifies order operations, refund requests, order inquiries, delivery issues, and complaints; performs deterministic and semantic risk checks; keeps business eligibility decisions deterministic; asks for confirmation before state-changing operations; and stores order operations, refund requests, support cases, and immutable events in PostgreSQL.
 
-Version: `0.7.0`
+Version: `0.8.0`
+
+## What's new in v0.8.0
+
+- Adds a tenant-scoped Provider operations control plane with five strict
+  internal FastAPI routes for safe queue inspection and manual redrive
+- Requires the exact `supervisor` role plus explicit `provider_ops:read` or
+  `provider_ops:redrive` permission at both Service and PostgreSQL boundaries
+- Coordinates idempotent, concurrent-safe Outbox and Inbox recovery cycles
+  with immutable actor/reason audit history and no synchronous Provider calls
+- Redrives only terminal technical Outbox failures; Provider business
+  rejections remain terminal and cannot be resent
+- Reprocesses only failed, unleased Inbox messages through the ordinary Worker
+  association and fencing path without changing callback payload/hash data
+- Adds additive migration `0008`, real PostgreSQL HTTP-to-Worker E2E coverage,
+  and strict response/OpenAPI field-whitelist audits
 
 ## What's new in v0.7.0
 
@@ -204,6 +219,33 @@ case to `on_hold` additionally requires `on_hold_reason`. See
 [`docs/internal_case_api.md`](docs/internal_case_api.md) for request examples,
 error codes, lifecycle rules, and deployment limitations.
 
+### Internal Provider operations API
+
+The v0.8 control plane exposes five routes under
+`/internal/provider-operations`: queue overview; Outbox and Inbox detail; and
+Outbox and Inbox redrive. Both reads and writes require an authenticated
+Supervisor with the exact Provider operations permission. Tenant scope comes
+only from the authenticated identity. Missing and cross-tenant identifiers use
+the same 404 response.
+
+Redrive accepts only a stable `request_id` and one fixed reason code. It commits
+an audit and new queue cycle synchronously but never calls a Provider or Worker;
+the separate Worker later reclaims the item normally. Responses omit payloads,
+customer/order/source-message content, Provider connection/reference data,
+callback hashes, secrets and raw diagnostics. See
+[`docs/v0.8_provider_operations.md`](docs/v0.8_provider_operations.md) for the
+route contract, eligibility rules, migration impact, error codes, validation,
+and rollback limitations.
+
+Request ids are unique per tenant and queue kind (Outbox and Inbox are separate
+namespaces). After migration `0008`, v0.7 Inbox Workers must not run against
+cycle-aware/redriven data; drain old Inbox Workers before migration and keep
+v0.8 Workers during route rollback unless a reviewed data-coordination gate
+proves rollback compatibility. Provider Ops itself adds no new Provider
+credential dependency, although the API lifespan still initializes the
+existing v0.7 connection resolvers. Authenticated malformed JSON receives a
+sanitized `422`; a valid request without credentials receives the shared `401`.
+
 ### Resume an order-priority interrupt
 
 When a run returns an `order_priority_confirmation` interrupt, resume the same thread rather than sending a new user message. To continue with the order, send:
@@ -274,7 +316,7 @@ On PowerShell:
 Copy-Item .env.example .env
 ```
 
-Fill in at least `OPENAI_API_KEY`, `OPENAI_MODEL`, and the PostgreSQL settings. `OPENAI_BASE_URL` can remain empty when the official OpenAI API is used. `CUSTOMER_SERVICE_CONTACT` optionally controls the contact text shown for manual review. For the v0.7 asynchronous Provider flow, also configure `PROVIDER_CONNECTIONS_JSON` for outbound commands and `PROVIDER_WEBHOOK_CONNECTIONS_JSON` for inbound HMAC trust; the two credential sets are deliberately separate.
+Fill in at least `OPENAI_API_KEY`, `OPENAI_MODEL`, and the PostgreSQL settings. `OPENAI_BASE_URL` can remain empty when the official OpenAI API is used. `CUSTOMER_SERVICE_CONTACT` optionally controls the contact text shown for manual review. For the v0.7+ asynchronous Provider flow, also configure `PROVIDER_CONNECTIONS_JSON` for outbound commands and `PROVIDER_WEBHOOK_CONNECTIONS_JSON` for inbound HMAC trust; the two credential sets are deliberately separate.
 
 You may configure PostgreSQL with one connection string:
 
@@ -322,7 +364,7 @@ The graph entry point is configured in `langgraph.json` as `agent.graph:create_g
 
 The Provider workers are separate processes and do not run inside LangGraph or
 FastAPI. After applying migrations, start them in separate terminals when
-testing the asynchronous v0.7 flow:
+testing the asynchronous Provider flow:
 
 ```bash
 uv run python -m agent.integrations.worker_main
@@ -369,6 +411,43 @@ To also delete the local PostgreSQL data volume and initialize a fresh database 
 ```bash
 docker compose down -v
 ```
+
+### Runtime image provenance
+
+The application image pins the official stable LangGraph Agent Server
+`0.12.6-py3.11-wolfi` manifest and builds the Datadog `serverless-init` helper
+from public Datadog Agent 7.81.2 source commit
+`6dbfeceb7c8e1575803f209afaa62004293724d6` with the pinned glibc-based
+`golang:1.26.6-bookworm` builder. The build checks the pinned toolchain, ELF
+interpreter and shared-library resolution and directly executes the helper in
+the final runtime before the image can succeed.
+The original `/app/datadog-init` invocation and `ddtrace-run` path are retained;
+source, compiler, and build tools remain outside the final stage. Apache-2.0,
+NOTICE, and third-party license records are copied into
+`/usr/share/licenses/datadog-init/`.
+
+Before application layers are added, the build verifies and removes only the
+known vulnerable helper from the pinned upstream rootfs, then copies that clean
+rootfs into a scratch-based stage and reconstructs the upstream container
+configuration. This intentional flattening prevents scanners from treating the
+now-inaccessible vulnerable ancestor binary as part of the final image. It also
+means upstream layer-level provenance is represented by the pinned digest and
+documented config/filesystem parity evidence rather than retained ancestry.
+
+Two release-graph modules are narrowly pinned to their first security-fixed
+versions: `golang.org/x/net@v0.56.0` and
+`google.golang.org/grpc@v1.82.1`. Go verifies their module checksums during the
+builder stage. These overrides are part of the approved dependency-graph
+divergence and must be retested with the helper when changed.
+
+This source build is an explicit security exception to the upstream image: the
+upstream helper was built from a modified dependency graph and supplied no
+verifiable build attestation. The public 7.81.2 release graph is therefore not
+byte-for-byte equivalent. Base, builder, source commit, Go build tags and
+version linker flags are pinned in `Dockerfile`; updates require rebuilding,
+runtime smoke tests, and a Critical/High scan of the resulting image. The final
+runtime also constrains `cryptography` to `>=50,<51` under the Agent Server's
+own constraints.
 
 ## Demonstration orders
 
@@ -458,14 +537,14 @@ PostgreSQL repository and API round-trip tests are skipped unless
 `CASE_TEST_POSTGRES_URI` points to a disposable test database. To run them explicitly:
 
 ```powershell
-$env:CASE_TEST_POSTGRES_URI = "postgresql://user:password@localhost:5432/refund_agent"
-uv run pytest -m postgres tests/integration_tests/test_postgres_case_repository.py
+$env:CASE_TEST_POSTGRES_URI = "postgresql://test-user:test-password@127.0.0.1:55432/test-db"
+uv run pytest -m postgres -p no:cacheprovider
 ```
 
-Never point `CASE_TEST_POSTGRES_URI` at a production database. The tests create
-and remove records whose thread IDs use a unique `case-integration-` prefix.
-GitHub Actions provisions a disposable PostgreSQL 16 service and runs these
-tests on both supported Python versions.
+Never point `CASE_TEST_POSTGRES_URI` at a production database. PostgreSQL tests
+use unique tenant/test identifiers and must run only in a disposable database.
+GitHub Actions provisions a disposable PostgreSQL 16 service and runs the
+suite on both supported Python versions.
 
 ## Project layout
 
@@ -523,7 +602,8 @@ tests on both supported Python versions.
 - Never commit `.env` or real credentials. The repository ignores `.env` by default.
 - The included order database is demonstration data, not customer data.
 - The demo identity provider maps bearer tokens from `DEMO_IDENTITY_TOKENS`
-  and is for local development only. Production must replace
+  and is deterministic local-development infrastructure only, not
+  production-grade authentication. Production must replace
   `IdentityProvider` with the customer's OAuth/OIDC, SSO, or identity system.
 - Assignment (`POST /{case_id}/assign`) validates the agent identifier but
   does not verify the agent exists in a user directory; production must
@@ -537,6 +617,12 @@ tests on both supported Python versions.
 - The internal support-case API is authenticated and role-protected from
   v0.6. Compose binds it to `127.0.0.1`; do not expose it to an external
   network without additional gateway controls such as rate limiting.
+- The Provider operations API is Supervisor-only and field-whitelisted, but
+  v0.8 does not approve production deployment. Keep it behind an internal
+  gateway and replace the demo identity boundary before any production use.
+- v0.8 intentionally does not include an operations UI, retention cleanup,
+  Worker heartbeat/Prometheus metrics, a distributed limiter or external
+  queue, or dynamic Provider key rotation.
 - Human-request and formal-complaint detection use LLM structured output and therefore require production evaluation against representative multilingual conversations.
 - The bundled risk rules are intentionally conservative demonstration data, not a complete safety or compliance vocabulary.
 - Semantic risk classification depends on the configured model and may vary across wording or languages. Validate the policy, prompts, and responses with qualified safety, legal, and compliance reviewers before production use.
@@ -551,7 +637,22 @@ Released under the MIT License. See `LICENSE`.
 
 这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别订单操作、退款申请、订单查询、物流问题和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断业务资格，在会改变状态的操作前请求用户确认，并把订单操作、退款申请、人工工单和不可变事件保存到 PostgreSQL。
 
-版本：`0.7.0`
+版本：`0.8.0`
+
+## v0.8.0 新增内容
+
+- 新增租户隔离的 Provider 运维控制面，通过五个严格的内部 FastAPI 路由
+  安全查看队列并执行人工 redrive；
+- 读取和恢复均要求准确的 `supervisor` 角色以及对应的
+  `provider_ops:read` / `provider_ops:redrive` 权限，Service 与 PostgreSQL
+  边界都会重复校验；
+- 通过不可变的操作人/固定原因审计，实现幂等、并发安全的 Outbox / Inbox
+  新周期恢复，HTTP 请求不会同步调用 Provider；
+- Outbox 只恢复终止的技术失败；Provider 业务拒绝保持终止状态且禁止重发；
+- Inbox 只恢复失败且无 lease 的消息，并由普通 Worker 重新执行完整关联与
+  fencing 校验，不修改 callback payload 或 hash；
+- 新增 additive migration `0008`、真实 PostgreSQL HTTP-to-Worker E2E，以及
+  严格的响应/OpenAPI 字段白名单审计。
 
 ## v0.7.0 新增内容
 
@@ -743,6 +844,27 @@ ID。PostgreSQL 写入失败会明确导致本次 Run 失败，不会返回一�
 自行传入。将工单改为 `on_hold` 时还必须提供 `on_hold_reason`。请求示例、错误码、状态规则和部署
 限制详见 [`docs/internal_case_api.md`](docs/internal_case_api.md)。
 
+### 内部 Provider 运维 API
+
+v0.8 在 `/internal/provider-operations` 下提供五个控制面接口：队列概览、
+Outbox / Inbox 详情，以及两类 redrive。读写都只允许具有准确 Provider 运维
+权限的已认证 supervisor。租户只能来自认证身份；不存在与跨租户资源统一返回
+相同的 404。
+
+redrive 请求只接受稳定的 `request_id` 和固定 reason code。请求会同步提交审计
+与新队列周期，但不会直接调用 Provider 或 Worker；独立 Worker 之后按普通路径
+重新认领。响应不会包含 payload、客户/订单/源消息内容、Provider 连接或引用、
+callback hash、密钥和原始诊断信息。完整路由契约、资格规则、迁移影响、错误码、
+验证与回滚限制见
+[`docs/v0.8_provider_operations.md`](docs/v0.8_provider_operations.md)。
+
+`request_id` 按租户与队列种类分别唯一（Outbox 与 Inbox 是独立命名空间）。应用
+迁移 `0008` 后，v0.7 Inbox Worker 不得再处理 cycle-aware/redrive 数据；迁移前
+必须先排空旧 Worker，回滚路由时仍应保留 v0.8 Worker，除非经过专门的数据协调
+门禁证明可安全回退。Provider Ops 本身不新增 Provider 凭据依赖，但 API lifespan
+仍会初始化 v0.7 已有的连接 resolver。已认证调用方提交畸形 JSON 时获得脱敏
+`422`，无凭据的合法请求继续使用共享 `401`。
+
 ### 恢复订单优先级 interrupt
 
 当运行结果出现 `order_priority_confirmation` interrupt 时，应当恢复同一个 thread，不能发送一条新的用户消息。继续处理订单时发送：
@@ -807,7 +929,7 @@ uv sync --extra dev
 Copy-Item .env.example .env
 ```
 
-至少填写 `OPENAI_API_KEY`、`OPENAI_MODEL` 和 PostgreSQL 配置。使用 OpenAI 官方接口时，`OPENAI_BASE_URL` 可以留空。`CUSTOMER_SERVICE_CONTACT` 可以用来设置转人工审核时显示的联系方式。使用 v0.7 异步 Provider 流程时，还应分别配置出站命令使用的 `PROVIDER_CONNECTIONS_JSON` 与入站 HMAC 信任使用的 `PROVIDER_WEBHOOK_CONNECTIONS_JSON`；两套凭据有意隔离。
+至少填写 `OPENAI_API_KEY`、`OPENAI_MODEL` 和 PostgreSQL 配置。使用 OpenAI 官方接口时，`OPENAI_BASE_URL` 可以留空。`CUSTOMER_SERVICE_CONTACT` 可以用来设置转人工审核时显示的联系方式。使用 v0.7+ 异步 Provider 流程时，还应分别配置出站命令使用的 `PROVIDER_CONNECTIONS_JSON` 与入站 HMAC 信任使用的 `PROVIDER_WEBHOOK_CONNECTIONS_JSON`；两套凭据有意隔离。
 
 可以直接设置完整的 PostgreSQL 连接地址：
 
@@ -850,7 +972,7 @@ DEMO_IDENTITY_TOKENS={"demo-customer-token":{"user_id":"customer-a","tenant_id":
 图入口已在 `langgraph.json` 中配置。
 
 Provider Worker 是独立进程，不会在 LangGraph 或 FastAPI 内启动。应用迁移后，
-可在不同终端启动 v0.7 异步流程：
+可在不同终端启动异步 Provider 流程：
 
 ```bash
 uv run python -m agent.integrations.worker_main
@@ -895,6 +1017,36 @@ docker compose down
 ```bash
 docker compose down -v
 ```
+
+### 运行镜像来源
+
+应用镜像固定使用官方 LangGraph Agent Server
+`0.12.6-py3.11-wolfi` manifest，并通过固定的 Go 1.26.6 builder，从公开的
+Datadog Agent 7.81.2 commit
+`6dbfeceb7c8e1575803f209afaa62004293724d6` 重建 `serverless-init`。
+builder 使用与最终 Wolfi runtime ABI 匹配的 Bookworm/glibc；构建会校验固定
+toolchain、ELF interpreter 和共享库解析，并在最终 runtime 中直接执行 helper，
+任一门禁失败都会终止镜像构建。
+`/app/datadog-init` 与 `ddtrace-run` 的原始调用方式保持不变；源码、编译器和构建
+工具不会进入最终 stage。Apache-2.0、NOTICE 与第三方许可记录位于
+`/usr/share/licenses/datadog-init/`。
+
+在加入应用层之前，构建会校验并只删除固定上游 rootfs 中已知有漏洞的 helper，
+再将干净 rootfs 复制到 scratch stage 并重建上游容器配置。该显式 flatten 可避免
+扫描器继续把已经不可访问的上游祖先层 binary 计入最终镜像；相应地，上游层级
+来源由固定 digest 和文档化的配置/文件系统一致性证据表达，而不再保留原始 ancestry。
+
+构建阶段还将 release graph 中的 `golang.org/x/net` 固定到首个安全修复版本
+`v0.56.0`，并将 `google.golang.org/grpc` 固定到 `v1.82.1`；Go 会校验模块
+checksum。这两个 override 也是已批准依赖图差异的一部分，后续变更必须重新测试
+helper。
+
+这是针对上游镜像的显式安全例外：上游 helper 使用修改过的依赖图构建，且没有
+可验证的构建 attestation，因此公开 7.81.2 release graph 并非逐字节等价。
+`Dockerfile` 固定了基础镜像、builder、源码 commit、Go build tags 和版本链接
+参数；升级时必须重新构建、执行运行时 smoke test，并对最终镜像重新进行
+Critical/High 扫描。最终运行时同时在 Agent Server 自身 constraints 下固定
+`cryptography>=50,<51`。
 
 ## 演示订单
 
@@ -978,11 +1130,13 @@ Graph 和内部 API 单元测试使用离线实现，不需要 API 密钥。只�
 Repository 与 API 往返集成测试：
 
 ```powershell
-$env:CASE_TEST_POSTGRES_URI = "postgresql://user:password@localhost:5432/refund_agent"
-uv run pytest -m postgres tests/integration_tests/test_postgres_case_repository.py
+$env:CASE_TEST_POSTGRES_URI = "postgresql://test-user:test-password@127.0.0.1:55432/test-db"
+uv run pytest -m postgres -p no:cacheprovider
 ```
 
-不要让 `CASE_TEST_POSTGRES_URI` 指向生产数据库。测试只会创建并清理 thread ID 带有唯一 `case-integration-` 前缀的数据。GitHub Actions 会启动一次性的 PostgreSQL 16 服务，并在两个受支持的 Python 版本上执行这些测试。
+不要让 `CASE_TEST_POSTGRES_URI` 指向生产数据库。PostgreSQL 测试使用唯一的
+租户/测试标识，并且只能在可清理数据库中运行。GitHub Actions 会启动一次性的
+PostgreSQL 16 服务，并在两个受支持的 Python 版本上执行这些测试。
 
 ## 项目结构
 
@@ -1040,8 +1194,8 @@ uv run pytest -m postgres tests/integration_tests/test_postgres_case_repository.
 - 不要提交 `.env` 或任何真实密钥；仓库已经默认忽略 `.env`。
 - 内置订单只是演示数据，不能保存真实客户信息。
 - demo 身份提供者从 `DEMO_IDENTITY_TOKENS` 解析 Bearer Token，仅用于本地
-  开发；生产环境必须把 `IdentityProvider` 替换为客户 OAuth/OIDC、SSO 或
-  自建身份系统。
+  确定性开发，不是生产级认证；生产环境必须把 `IdentityProvider` 替换为
+  客户 OAuth/OIDC、SSO 或自建身份系统。
 - 工单分配（`POST /{case_id}/assign`）只校验客服标识格式，不验证该客服
   是否真实存在于用户目录；生产环境必须对接真实身份系统解析被分配人。
 - 生产服务必须验证用户身份，并确认订单确实属于发起请求的用户。
@@ -1051,6 +1205,10 @@ uv run pytest -m postgres tests/integration_tests/test_postgres_case_repository.
 - 内部工单 API 自 v0.6 起已启用认证与角色保护。Compose 只把它绑定到
   `127.0.0.1`；在没有额外的网关控制（如限流）之前，不应将该接口暴露到
   外部网络。
+- Provider 运维 API 仅允许 supervisor 且采用字段白名单，但 v0.8 并未批准
+  生产部署。任何生产使用前都必须放在内部网关后，并替换 demo 身份边界。
+- v0.8 明确不包含运维 UI、retention cleanup、Worker heartbeat / Prometheus、
+  分布式限流器或外部队列，以及 Provider 动态密钥轮换。
 - 真人请求和正式投诉识别依赖 LLM 结构化输出，上线前仍需使用有代表性的多语言对话进行评测。
 - 内置风险规则是有意保持保守的演示数据，并不是完整的安全或合规词库。
 - 语义风险分类取决于所配置的模型，可能因措辞或语言不同而产生差异。投入生产环境前，应由专业的安全、法务和合规人员验证规则、提示词和回复内容。

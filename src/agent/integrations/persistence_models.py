@@ -48,6 +48,11 @@ InboxAttemptOutcome = Literal[
     "terminal_failure",
     "lease_expired",
 ]
+RedriveReasonCode = Literal[
+    "dependency_or_configuration_restored",
+    "transient_incident_resolved",
+    "manual_retry_approved",
+]
 
 _ERROR_MESSAGE_MAX = 500
 
@@ -183,9 +188,7 @@ class OutboxDeliveryAttempt(BaseModel):
     provider_operation_id: str | None = Field(default=None, min_length=1)
     provider_reference: str | None = Field(default=None, min_length=1)
     safe_error_code: str | None = Field(default=None, max_length=_ERROR_MESSAGE_MAX)
-    safe_error_message: str | None = Field(
-        default=None, max_length=_ERROR_MESSAGE_MAX
-    )
+    safe_error_message: str | None = Field(default=None, max_length=_ERROR_MESSAGE_MAX)
     retry_after_seconds: float | None = Field(default=None, ge=0)
     next_available_at: AwareDatetime | None = None
 
@@ -219,9 +222,7 @@ class OutboxDeliveryAttempt(BaseModel):
             if self.failure_kind is None:
                 raise ValueError(f"{self.outcome} requires failure_kind")
         elif self.failure_kind is not None:
-            raise ValueError(
-                "accepted and lease_expired must not carry failure_kind"
-            )
+            raise ValueError("accepted and lease_expired must not carry failure_kind")
         return self
 
 
@@ -257,6 +258,7 @@ class OutboxRedrive(BaseModel):
     request_id: str = Field(min_length=1)
     requested_by: str = Field(min_length=1)
     reason: str = Field(min_length=1, max_length=500)
+    reason_code: RedriveReasonCode | None = None
     previous_cycle: int = Field(ge=1)
     new_cycle: int = Field(ge=2)
     created_at: AwareDatetime
@@ -293,6 +295,8 @@ class InboxMessage(BaseModel):
     raw_body_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     status: InboxProcessingStatus
     processing_attempts: int = Field(default=0, ge=0)
+    processing_cycle: int = Field(default=1, ge=1)
+    attempts_in_cycle: int = Field(default=0, ge=0, le=5)
     available_at: AwareDatetime
     lease_id: UUID | None = None
     lease_owner: str | None = Field(default=None, min_length=1)
@@ -353,6 +357,7 @@ class InboxProcessingAttempt(BaseModel):
 
     attempt_id: UUID
     inbox_id: UUID
+    processing_cycle: int = Field(default=1, ge=1)
     attempt_number: int = Field(ge=1)
     lease_id: UUID
     worker_id: str = Field(min_length=1)
@@ -360,9 +365,7 @@ class InboxProcessingAttempt(BaseModel):
     finished_at: AwareDatetime | None = None
     outcome: InboxAttemptOutcome | None = None
     safe_error_code: str | None = Field(default=None, max_length=_ERROR_MESSAGE_MAX)
-    safe_error_message: str | None = Field(
-        default=None, max_length=_ERROR_MESSAGE_MAX
-    )
+    safe_error_message: str | None = Field(default=None, max_length=_ERROR_MESSAGE_MAX)
 
     @field_validator("started_at", "finished_at", mode="after")
     @classmethod
@@ -394,8 +397,45 @@ class ClaimedInboxMessage(InboxMessage):
             raise ValueError("a claimed message must be processing")
         if self.attempt.inbox_id != self.inbox_id:
             raise ValueError("attempt inbox_id must match the message")
+        if self.attempt.processing_cycle != self.processing_cycle:
+            raise ValueError("attempt processing_cycle must match the message")
+        if self.attempt.attempt_number != self.processing_attempts:
+            raise ValueError("attempt number must match lifetime processing attempts")
         if self.attempt.lease_id != self.lease_id:
             raise ValueError("attempt lease_id must match the message lease")
         if self.attempt.worker_id != self.lease_owner:
             raise ValueError("attempt worker_id must match the lease owner")
+        return self
+
+
+class InboxRedrive(BaseModel):
+    """One immutable manual redrive record for a failed Inbox message."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    redrive_id: UUID
+    inbox_id: UUID
+    tenant_id: str = Field(min_length=1)
+    request_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    requested_by: str = Field(min_length=1)
+    reason_code: RedriveReasonCode
+    previous_cycle: int = Field(ge=1)
+    new_cycle: int = Field(ge=2)
+    created_at: AwareDatetime
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def _normalize_utc(cls, value: AwareDatetime) -> AwareDatetime:
+        """Normalize the timestamp to UTC."""
+        return _to_utc(value)
+
+    @model_validator(mode="after")
+    def validate_cycle(self) -> Self:
+        """Require the redrive to open exactly the next processing cycle."""
+        if self.new_cycle != self.previous_cycle + 1:
+            raise ValueError("new_cycle must equal previous_cycle + 1")
         return self

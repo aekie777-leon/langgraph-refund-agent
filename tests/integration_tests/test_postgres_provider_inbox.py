@@ -1142,7 +1142,9 @@ async def test_order_operation_inbox_event_order_id_mismatch_fails_atomically(
     assert "ORD-99999" not in attempt[2]
 
 
-@pytest.mark.parametrize("fence_field", ["lease_id", "lease_owner", "attempt_id"])
+@pytest.mark.parametrize(
+    "fence_field", ["lease_id", "lease_owner", "attempt_id", "processing_cycle"]
+)
 async def test_order_operation_inbox_forged_fence_rolls_back(
     postgres_context, fence_field: str
 ) -> None:
@@ -1187,13 +1189,23 @@ async def test_order_operation_inbox_forged_fence_rolls_back(
                 ),
             }
         )
-    else:
+    elif fence_field == "attempt_id":
         forged_value = uuid4()
         forged = claimed.model_copy(
             update={
                 "attempt": claimed.attempt.model_copy(
                     update={"attempt_id": forged_value}
                 )
+            }
+        )
+    else:
+        forged_value = claimed.processing_cycle + 1
+        forged = claimed.model_copy(
+            update={
+                "processing_cycle": forged_value,
+                "attempt": claimed.attempt.model_copy(
+                    update={"processing_cycle": forged_value}
+                ),
             }
         )
 
@@ -1208,7 +1220,7 @@ async def test_order_operation_inbox_forged_fence_rolls_back(
     outbox_after = await integration_repo.get_outbox_message(claimed.command_id)
     events_after = await _status_events(pool, queued.operation_id)
     attempt_after = await _attempt_fencing_details(pool, claimed.attempt.attempt_id)
-    assert str(forged_value) not in str(raised.value)
+    assert str(raised.value) == str(claimed.inbox_id)
     assert persisted_after is not None
     assert persisted_after.model_dump(mode="json") == inbox_snapshot
     assert persisted_after.status == "processing"

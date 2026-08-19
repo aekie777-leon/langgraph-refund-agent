@@ -79,6 +79,7 @@ _EVENT_COLUMNS = """
     provider_command_id,
     provider_command_status,
     provider_reference,
+    provider_redrive_reason_code,
     actor,
     customer_id,
     tenant_id,
@@ -92,7 +93,7 @@ _INSERT_CASE = f"""
 
 _INSERT_EVENT = f"""
     INSERT INTO case_management.support_case_events ({_EVENT_COLUMNS})
-    VALUES ({', '.join(['%s'] * 24)})
+    VALUES ({', '.join(['%s'] * 25)})
 """
 
 
@@ -155,6 +156,7 @@ def _event_values(event: SupportCaseEvent) -> tuple[Any, ...]:
         event.provider_command_id,
         event.provider_command_status,
         event.provider_reference,
+        event.provider_redrive_reason_code,
         event.actor,
         event.customer_id,
         event.tenant_id,

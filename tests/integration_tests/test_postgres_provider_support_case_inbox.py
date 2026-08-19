@@ -1422,7 +1422,7 @@ async def test_support_case_inbox_event_idempotency_conflict_rolls_back_atomical
         async with connection.transaction():
             await connection.execute(
                 f"INSERT INTO case_management.support_case_events ({_EVENT_COLUMNS}) "
-                f"VALUES ({', '.join(['%s'] * 24)})",
+                f"VALUES ({', '.join(['%s'] * 25)})",
                 _event_values(conflict_event),
             )
     case_before = await case_repo.get_case(scope, case.case_id)

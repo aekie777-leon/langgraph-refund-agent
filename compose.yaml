@@ -22,7 +22,7 @@ services:
       start_period: 10s
 
   case-migrations:
-    image: langgraph-refund-agent:0.7.0
+    image: langgraph-refund-agent:0.8.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -44,7 +44,7 @@ services:
       retries: 10
 
   langgraph-api:
-    image: langgraph-refund-agent:0.7.0
+    image: langgraph-refund-agent:0.8.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -67,7 +67,7 @@ services:
         condition: service_healthy
 
   outbox-worker:
-    image: langgraph-refund-agent:0.7.0
+    image: langgraph-refund-agent:0.8.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -85,7 +85,7 @@ services:
         condition: service_healthy
 
   inbox-worker:
-    image: langgraph-refund-agent:0.7.0
+    image: langgraph-refund-agent:0.8.0
     build:
       context: .
       dockerfile: Dockerfile

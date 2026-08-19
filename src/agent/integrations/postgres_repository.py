@@ -25,7 +25,6 @@ from agent.integrations.persistence_models import (
     InboxProcessingAttempt,
     OutboxDeliveryAttempt,
     OutboxMessage,
-    OutboxRedrive,
 )
 from agent.integrations.postgres_writes import (
     finish_delivery_attempt,
@@ -37,14 +36,11 @@ from agent.integrations.postgres_writes import (
     mark_inbox_failed as mark_inbox_failed_cursor,
 )
 from agent.integrations.repository import (
-    DuplicateRedriveRequestError,
     InboxAttemptsExhaustedError,
     InboxEventConflictError,
     IntegrationPersistenceError,
-    InvalidRedriveStateError,
     LeaseConflictError,
     OutboxAttemptsExhaustedError,
-    OutboxMessageNotFoundError,
 )
 
 _OUTBOX_COLUMNS = """
@@ -59,7 +55,8 @@ _OUTBOX_COLUMNS = """
 _INBOX_COLUMNS = """
     inbox_id, provider_connection_id, event_id, tenant_id, schema_version,
     event_type, command_id, aggregate_type, aggregate_id, payload,
-    raw_body_sha256, status, processing_attempts, available_at, lease_id,
+    raw_body_sha256, status, processing_attempts, processing_cycle,
+    attempts_in_cycle, available_at, lease_id,
     lease_owner, lease_expires_at, last_error_code, last_error_message,
     received_at, updated_at, processed_at, failed_at
 """
@@ -175,7 +172,9 @@ class PostgresIntegrationRepository:
                     await cursor.execute(query, (command_id,))
                     row = await cursor.fetchone()
         except (errors.DatabaseError, PoolTimeout) as error:
-            raise IntegrationPersistenceError("Failed to read outbox message") from error
+            raise IntegrationPersistenceError(
+                "Failed to read outbox message"
+            ) from error
         return None if row is None else _outbox_from_row(row)
 
     async def claim_due_outbox(
@@ -226,7 +225,9 @@ class PostgresIntegrationRepository:
                                     lease_expires_at = clock_timestamp()
                                         + (%s * interval '1 second'),
                                     attempts_in_cycle = attempts_in_cycle + 1,
-                                    updated_at = clock_timestamp()
+                                    updated_at = GREATEST(
+                                        clock_timestamp(), updated_at, created_at
+                                    )
                                 WHERE command_id = %s
                                 RETURNING {_OUTBOX_COLUMNS}
                                 """,
@@ -276,7 +277,9 @@ class PostgresIntegrationRepository:
                                 )
                             )
         except (errors.DatabaseError, PoolTimeout) as error:
-            raise IntegrationPersistenceError("Failed to claim outbox messages") from error
+            raise IntegrationPersistenceError(
+                "Failed to claim outbox messages"
+            ) from error
         return claimed
 
     async def renew_outbox_lease(
@@ -304,7 +307,9 @@ class PostgresIntegrationRepository:
                     UPDATE integration.outbox_messages
                     SET lease_expires_at = clock_timestamp()
                             + (%s * interval '1 second'),
-                        updated_at = clock_timestamp()
+                        updated_at = GREATEST(
+                            clock_timestamp(), updated_at, created_at
+                        )
                     WHERE command_id = %s AND lease_id = %s AND lease_owner = %s
                       AND status = 'processing'
                       AND lease_expires_at > clock_timestamp()
@@ -327,8 +332,8 @@ class PostgresIntegrationRepository:
                 async with connection.transaction():
                     async with connection.cursor(row_factory=dict_row) as cursor:
                         await cursor.execute(
-                            """
-                            SELECT command_id, lease_id, attempts_in_cycle
+                            f"""
+                            SELECT {_OUTBOX_COLUMNS}
                             FROM integration.outbox_messages
                             WHERE status = 'processing'
                               AND lease_expires_at < clock_timestamp()
@@ -341,14 +346,83 @@ class PostgresIntegrationRepository:
                         for row in rows:
                             await cursor.execute(
                                 """
+                                SELECT attempt_id, command_id, delivery_cycle,
+                                       attempt_number, lease_id, worker_id,
+                                       started_at, finished_at, outcome,
+                                       failure_kind, http_status,
+                                       provider_operation_id, provider_reference,
+                                       safe_error_code, safe_error_message,
+                                       retry_after_seconds, next_available_at
+                                FROM integration.outbox_delivery_attempts
+                                WHERE command_id = %s AND lease_id = %s
+                                  AND finished_at IS NULL
+                                FOR UPDATE
+                                """,
+                                (row["command_id"], row["lease_id"]),
+                            )
+                            attempt_row = await cursor.fetchone()
+                            if attempt_row is None:
+                                raise LeaseConflictError(str(row["command_id"]))
+                            await cursor.execute(
+                                """
+                                SELECT GREATEST(
+                                    clock_timestamp(), %s, %s, %s
+                                ) AS now
+                                """,
+                                (
+                                    row["created_at"],
+                                    row["updated_at"],
+                                    attempt_row["started_at"],
+                                ),
+                            )
+                            now_row = await cursor.fetchone()
+                            if now_row is None:
+                                raise IntegrationPersistenceError(
+                                    "clock_timestamp returned no row"
+                                )
+                            effective_now = now_row["now"]
+                            if (
+                                row["attempts_in_cycle"] >= 8
+                                and row["aggregate_type"] == "order_operation"
+                            ):
+                                # Import locally to keep the repository/finalizer
+                                # modules acyclic at import time.  The helper is
+                                # cursor-scoped, so aggregate review state and
+                                # lease exhaustion commit or roll back together.
+                                from agent.integrations.finalization import (
+                                    PostgresOutboxFinalizer,
+                                )
+
+                                message = _outbox_from_row(row)
+                                attempt = _attempt_from_row(attempt_row)
+                                claimed = ClaimedOutboxMessage.model_validate(
+                                    {
+                                        **row,
+                                        "payload": message.payload,
+                                        "attempt": attempt,
+                                    }
+                                )
+                                await PostgresOutboxFinalizer(
+                                    self._pool
+                                )._finalize_operation(
+                                    cursor=cursor,
+                                    claimed=claimed,
+                                    target="dead",
+                                    provider_result=None,
+                                    failure_kind=None,
+                                    now=effective_now,
+                                )
+                            await cursor.execute(
+                                """
                                 UPDATE integration.outbox_delivery_attempts
-                                SET finished_at = clock_timestamp(),
+                                SET finished_at = GREATEST(%s, started_at),
                                     outcome = 'lease_expired',
                                     safe_error_code = %s
                                 WHERE command_id = %s AND lease_id = %s
                                   AND finished_at IS NULL
                                 """,
                                 (
+                                    effective_now,
                                     "lease_expired"
                                     if row["attempts_in_cycle"] < 8
                                     else "lease_expired_attempts_exhausted",
@@ -356,6 +430,8 @@ class PostgresIntegrationRepository:
                                     row["lease_id"],
                                 ),
                             )
+                            if cursor.rowcount != 1:
+                                raise LeaseConflictError(str(row["command_id"]))
                             if row["attempts_in_cycle"] < 8:
                                 # Attempts 1..7: the message may be retried.
                                 await cursor.execute(
@@ -365,7 +441,9 @@ class PostgresIntegrationRepository:
                                         available_at = clock_timestamp(),
                                         lease_id = NULL, lease_owner = NULL,
                                         lease_expires_at = NULL,
-                                        updated_at = clock_timestamp()
+                                        updated_at = GREATEST(
+                                            clock_timestamp(), updated_at, created_at
+                                        )
                                     WHERE command_id = %s
                                     """,
                                     (row["command_id"],),
@@ -379,18 +457,24 @@ class PostgresIntegrationRepository:
                                     """
                                     UPDATE integration.outbox_messages
                                     SET status = 'dead',
-                                        dead_at = clock_timestamp(),
+                                        dead_at = GREATEST(
+                                            clock_timestamp(), updated_at, created_at
+                                        ),
                                         lease_id = NULL, lease_owner = NULL,
                                         lease_expires_at = NULL,
                                         last_error_code =
                                             'lease_expired_attempts_exhausted',
-                                        updated_at = clock_timestamp()
+                                        updated_at = GREATEST(
+                                            clock_timestamp(), updated_at, created_at
+                                        )
                                     WHERE command_id = %s
                                     """,
                                     (row["command_id"],),
                                 )
                             recovered += 1
-        except (errors.DatabaseError, PoolTimeout) as error:
+        except LeaseConflictError:
+            raise
+        except (errors.DatabaseError, PoolTimeout, ValueError) as error:
             raise IntegrationPersistenceError(
                 "Failed to recover expired outbox leases"
             ) from error
@@ -476,117 +560,9 @@ class PostgresIntegrationRepository:
         except (LeaseConflictError, OutboxAttemptsExhaustedError):
             raise
         except (errors.DatabaseError, PoolTimeout) as error:
-            raise IntegrationPersistenceError("Failed to schedule outbox retry") from error
-
-    async def redrive_dead_outbox(
-        self,
-        *,
-        command_id: UUID,
-        tenant_id: str,
-        request_id: str,
-        requested_by: str,
-        reason: str,
-        redrive_id: UUID,
-        created_at: datetime,
-    ) -> OutboxRedrive:
-        """Manually redrive a dead outbox command into a fresh delivery cycle."""
-        try:
-            async with self._pool.connection() as connection:
-                async with connection.transaction():
-                    async with connection.cursor(row_factory=dict_row) as cursor:
-                        await cursor.execute(
-                            """
-                            SELECT delivery_cycle, status, tenant_id
-                            FROM integration.outbox_messages
-                            WHERE command_id = %s
-                            FOR UPDATE
-                            """,
-                            (command_id,),
-                        )
-                        row = await cursor.fetchone()
-                        if row is None:
-                            raise OutboxMessageNotFoundError(str(command_id))
-                        if row["tenant_id"] != tenant_id:
-                            raise OutboxMessageNotFoundError(str(command_id))
-                        # A duplicate request must be reported as such even
-                        # after the first redrive moved the message out of
-                        # dead; the unique constraint below remains as the
-                        # race fallback for concurrent same-request redrives.
-                        await cursor.execute(
-                            """
-                            SELECT 1
-                            FROM integration.outbox_redrives
-                            WHERE tenant_id = %s
-                              AND request_id = %s
-                            """,
-                            (tenant_id, request_id),
-                        )
-                        if await cursor.fetchone() is not None:
-                            raise DuplicateRedriveRequestError(request_id)
-                        if row["status"] != "dead":
-                            raise InvalidRedriveStateError(
-                                f"outbox message is {row['status']}, not dead"
-                            )
-                        previous_cycle = int(row["delivery_cycle"])
-                        new_cycle = previous_cycle + 1
-                        await cursor.execute(
-                            """
-                            UPDATE integration.outbox_messages
-                            SET status = 'retry_scheduled',
-                                delivery_cycle = %s,
-                                attempts_in_cycle = 0,
-                                available_at = clock_timestamp(),
-                                dead_at = NULL,
-                                lease_id = NULL, lease_owner = NULL,
-                                lease_expires_at = NULL,
-                                updated_at = clock_timestamp()
-                            WHERE command_id = %s
-                            """,
-                            (new_cycle, command_id),
-                        )
-                        await cursor.execute(
-                            """
-                            INSERT INTO integration.outbox_redrives (
-                                redrive_id, command_id, tenant_id, request_id,
-                                requested_by, reason, previous_cycle, new_cycle,
-                                created_at
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            """,
-                            (
-                                redrive_id,
-                                command_id,
-                                tenant_id,
-                                request_id,
-                                requested_by,
-                                reason,
-                                previous_cycle,
-                                new_cycle,
-                                created_at,
-                            ),
-                        )
-        except errors.UniqueViolation as error:
-            if error.diag.constraint_name == "uq_outbox_redrives_tenant_request":
-                raise DuplicateRedriveRequestError(request_id) from error
-            raise IntegrationPersistenceError("Failed to redrive outbox message") from error
-        except (
-            OutboxMessageNotFoundError,
-            InvalidRedriveStateError,
-            DuplicateRedriveRequestError,
-        ):
-            raise
-        except (errors.DatabaseError, PoolTimeout) as error:
-            raise IntegrationPersistenceError("Failed to redrive outbox message") from error
-        return OutboxRedrive(
-            redrive_id=redrive_id,
-            command_id=command_id,
-            tenant_id=tenant_id,
-            request_id=request_id,
-            requested_by=requested_by,
-            reason=reason,
-            previous_cycle=previous_cycle,
-            new_cycle=new_cycle,
-            created_at=created_at,
-        )
+            raise IntegrationPersistenceError(
+                "Failed to schedule outbox retry"
+            ) from error
 
     # ------------------------------------------------------------- inbox
 
@@ -722,7 +698,7 @@ class PostgresIntegrationRepository:
                             WHERE inbox_id IN (
                                 SELECT inbox_id FROM integration.inbox_messages
                                 WHERE status = 'received'
-                                  AND processing_attempts < 5
+                                  AND attempts_in_cycle < 5
                                   AND available_at <= clock_timestamp()
                                 ORDER BY available_at, received_at, inbox_id
                                 FOR UPDATE SKIP LOCKED
@@ -745,10 +721,13 @@ class PostgresIntegrationRepository:
                                     lease_expires_at = clock_timestamp()
                                         + (%s * interval '1 second'),
                                     processing_attempts = processing_attempts + 1,
-                                    updated_at = clock_timestamp()
+                                    attempts_in_cycle = attempts_in_cycle + 1,
+                                    updated_at = GREATEST(
+                                        clock_timestamp(), updated_at, received_at
+                                    )
                                 WHERE inbox_id = %s
                                   AND status = 'received'
-                                  AND processing_attempts < 5
+                                  AND attempts_in_cycle < 5
                                 RETURNING {_INBOX_COLUMNS}
                                 """,
                                 (lease_id, worker_id, lease_seconds, row["inbox_id"]),
@@ -759,13 +738,15 @@ class PostgresIntegrationRepository:
                             await cursor.execute(
                                 """
                                 INSERT INTO integration.inbox_processing_attempts (
-                                    attempt_id, inbox_id, attempt_number,
+                                    attempt_id, inbox_id, processing_cycle,
+                                    attempt_number,
                                     lease_id, worker_id, started_at
-                                ) VALUES (%s, %s, %s, %s, %s, %s)
+                                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                                 """,
                                 (
                                     attempt_id,
                                     updated_row["inbox_id"],
+                                    updated_row["processing_cycle"],
                                     updated_row["processing_attempts"],
                                     lease_id,
                                     worker_id,
@@ -775,6 +756,7 @@ class PostgresIntegrationRepository:
                             attempt = InboxProcessingAttempt(
                                 attempt_id=attempt_id,
                                 inbox_id=updated_row["inbox_id"],
+                                processing_cycle=updated_row["processing_cycle"],
                                 attempt_number=updated_row["processing_attempts"],
                                 lease_id=lease_id,
                                 worker_id=worker_id,
@@ -793,7 +775,9 @@ class PostgresIntegrationRepository:
                                 )
                             )
         except (errors.DatabaseError, PoolTimeout) as error:
-            raise IntegrationPersistenceError("Failed to claim inbox messages") from error
+            raise IntegrationPersistenceError(
+                "Failed to claim inbox messages"
+            ) from error
         return claimed
 
     async def renew_inbox_lease(
@@ -821,7 +805,9 @@ class PostgresIntegrationRepository:
                     UPDATE integration.inbox_messages
                     SET lease_expires_at = clock_timestamp()
                             + (%s * interval '1 second'),
-                        updated_at = clock_timestamp()
+                        updated_at = GREATEST(
+                            clock_timestamp(), updated_at, received_at
+                        )
                     WHERE inbox_id = %s AND lease_id = %s AND lease_owner = %s
                       AND status = 'processing'
                       AND lease_expires_at > clock_timestamp()
@@ -845,7 +831,7 @@ class PostgresIntegrationRepository:
                     async with connection.cursor(row_factory=dict_row) as cursor:
                         await cursor.execute(
                             """
-                            SELECT inbox_id, lease_id, lease_owner, processing_attempts
+                            SELECT inbox_id, lease_id, lease_owner, attempts_in_cycle
                             FROM integration.inbox_messages
                             WHERE status = 'processing'
                               AND lease_expires_at < clock_timestamp()
@@ -859,7 +845,9 @@ class PostgresIntegrationRepository:
                             await cursor.execute(
                                 """
                                 UPDATE integration.inbox_processing_attempts
-                                SET finished_at = clock_timestamp(),
+                                SET finished_at = GREATEST(
+                                        clock_timestamp(), started_at
+                                    ),
                                     outcome = 'lease_expired',
                                     safe_error_code = 'lease_expired'
                                 WHERE inbox_id = %s AND lease_id = %s
@@ -869,20 +857,28 @@ class PostgresIntegrationRepository:
                             )
                             if cursor.rowcount != 1:
                                 raise LeaseConflictError(str(row["inbox_id"]))
-                            if row["processing_attempts"] >= 5:
+                            if row["attempts_in_cycle"] >= 5:
                                 await cursor.execute(
                                     """
                                     UPDATE integration.inbox_messages
-                                    SET status = 'failed', failed_at = clock_timestamp(),
+                                    SET status = 'failed', failed_at = GREATEST(
+                                            clock_timestamp(), updated_at, received_at
+                                        ),
                                         lease_id = NULL, lease_owner = NULL,
                                         lease_expires_at = NULL,
                                         last_error_code = 'lease_expired_attempts_exhausted',
-                                        updated_at = clock_timestamp()
+                                        updated_at = GREATEST(
+                                            clock_timestamp(), updated_at, received_at
+                                        )
                                     WHERE inbox_id = %s AND status = 'processing'
                                       AND lease_id = %s AND lease_owner = %s
                                       AND lease_expires_at < clock_timestamp()
                                     """,
-                                    (row["inbox_id"], row["lease_id"], row["lease_owner"]),
+                                    (
+                                        row["inbox_id"],
+                                        row["lease_id"],
+                                        row["lease_owner"],
+                                    ),
                                 )
                             else:
                                 await cursor.execute(
@@ -892,12 +888,18 @@ class PostgresIntegrationRepository:
                                     available_at = clock_timestamp(),
                                     lease_id = NULL, lease_owner = NULL,
                                     lease_expires_at = NULL,
-                                    updated_at = clock_timestamp()
+                                    updated_at = GREATEST(
+                                        clock_timestamp(), updated_at, received_at
+                                    )
                                 WHERE inbox_id = %s AND status = 'processing'
                                   AND lease_id = %s AND lease_owner = %s
                                   AND lease_expires_at < clock_timestamp()
                                 """,
-                                    (row["inbox_id"], row["lease_id"], row["lease_owner"]),
+                                    (
+                                        row["inbox_id"],
+                                        row["lease_id"],
+                                        row["lease_owner"],
+                                    ),
                                 )
                             if cursor.rowcount != 1:
                                 raise LeaseConflictError(str(row["inbox_id"]))
@@ -972,11 +974,19 @@ class PostgresIntegrationRepository:
         except LeaseConflictError:
             raise
         except (errors.DatabaseError, PoolTimeout) as error:
-            raise IntegrationPersistenceError("Failed to mark inbox message failed") from error
+            raise IntegrationPersistenceError(
+                "Failed to mark inbox message failed"
+            ) from error
 
     async def schedule_inbox_retry(
-        self, *, inbox_id: UUID, lease_id: UUID, lease_owner: str,
-        attempt_id: UUID, next_available_at: datetime, error_code: str | None,
+        self,
+        *,
+        inbox_id: UUID,
+        lease_id: UUID,
+        lease_owner: str,
+        attempt_id: UUID,
+        next_available_at: datetime,
+        error_code: str | None,
         error_message: str | None,
     ) -> None:
         """Atomically complete a fenced attempt and return the Inbox to received."""
@@ -984,26 +994,82 @@ class PostgresIntegrationRepository:
             async with self._pool.connection() as connection:
                 async with connection.transaction():
                     async with connection.cursor(row_factory=dict_row) as cursor:
-                        await cursor.execute("SELECT processing_attempts FROM integration.inbox_messages WHERE inbox_id = %s AND status = 'processing' AND lease_id = %s AND lease_owner = %s FOR UPDATE", (inbox_id, lease_id, lease_owner))
+                        await cursor.execute(
+                            "SELECT attempts_in_cycle FROM integration.inbox_messages WHERE inbox_id = %s AND status = 'processing' AND lease_id = %s AND lease_owner = %s FOR UPDATE",
+                            (inbox_id, lease_id, lease_owner),
+                        )
                         row = await cursor.fetchone()
                         if row is None:
                             raise LeaseConflictError(str(inbox_id))
                         await cursor.execute("SELECT clock_timestamp() AS now")
                         now_row = await cursor.fetchone()
                         if now_row is None:
-                            raise IntegrationPersistenceError("clock_timestamp returned no row")
+                            raise IntegrationPersistenceError(
+                                "clock_timestamp returned no row"
+                            )
                         now = now_row["now"]
-                        if row["processing_attempts"] >= 5:
-                            if await finish_inbox_attempt(cursor, attempt_id=attempt_id, inbox_id=inbox_id, lease_id=lease_id, worker_id=lease_owner, finished_at=now, outcome="terminal_failure", safe_error_code="inbox_attempts_exhausted", safe_error_message="Inbox processing attempts were exhausted.") != 1:
+                        if row["attempts_in_cycle"] >= 5:
+                            if (
+                                await finish_inbox_attempt(
+                                    cursor,
+                                    attempt_id=attempt_id,
+                                    inbox_id=inbox_id,
+                                    lease_id=lease_id,
+                                    worker_id=lease_owner,
+                                    finished_at=now,
+                                    outcome="terminal_failure",
+                                    safe_error_code="inbox_attempts_exhausted",
+                                    safe_error_message="Inbox processing attempts were exhausted.",
+                                )
+                                != 1
+                            ):
                                 raise LeaseConflictError(str(inbox_id))
-                            if await mark_inbox_failed_cursor(cursor, inbox_id=inbox_id, lease_id=lease_id, lease_owner=lease_owner, failed_at=now, error_code="inbox_attempts_exhausted", error_message="Inbox processing attempts were exhausted.") != 1:
+                            if (
+                                await mark_inbox_failed_cursor(
+                                    cursor,
+                                    inbox_id=inbox_id,
+                                    lease_id=lease_id,
+                                    lease_owner=lease_owner,
+                                    failed_at=now,
+                                    error_code="inbox_attempts_exhausted",
+                                    error_message="Inbox processing attempts were exhausted.",
+                                )
+                                != 1
+                            ):
                                 raise LeaseConflictError(str(inbox_id))
                             return
-                        if await finish_inbox_attempt(cursor, attempt_id=attempt_id, inbox_id=inbox_id, lease_id=lease_id, worker_id=lease_owner, finished_at=now, outcome="retry_scheduled", safe_error_code=error_code, safe_error_message=error_message) != 1:
+                        if (
+                            await finish_inbox_attempt(
+                                cursor,
+                                attempt_id=attempt_id,
+                                inbox_id=inbox_id,
+                                lease_id=lease_id,
+                                worker_id=lease_owner,
+                                finished_at=now,
+                                outcome="retry_scheduled",
+                                safe_error_code=error_code,
+                                safe_error_message=error_message,
+                            )
+                            != 1
+                        ):
                             raise LeaseConflictError(str(inbox_id))
-                        if await schedule_inbox_retry(cursor, inbox_id=inbox_id, lease_id=lease_id, lease_owner=lease_owner, available_at=next_available_at, updated_at=now, error_code=error_code, error_message=error_message) != 1:
+                        if (
+                            await schedule_inbox_retry(
+                                cursor,
+                                inbox_id=inbox_id,
+                                lease_id=lease_id,
+                                lease_owner=lease_owner,
+                                available_at=next_available_at,
+                                updated_at=now,
+                                error_code=error_code,
+                                error_message=error_message,
+                            )
+                            != 1
+                        ):
                             raise LeaseConflictError(str(inbox_id))
         except (LeaseConflictError, InboxAttemptsExhaustedError):
             raise
         except (errors.DatabaseError, PoolTimeout) as error:
-            raise IntegrationPersistenceError("Failed to schedule inbox retry") from error
+            raise IntegrationPersistenceError(
+                "Failed to schedule inbox retry"
+            ) from error

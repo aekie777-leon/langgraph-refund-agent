@@ -1,6 +1,5 @@
 """PostgreSQL atomic finalization for dispatched provider commands."""
 
-from datetime import UTC, datetime
 from typing import Literal
 from uuid import uuid4
 
@@ -50,6 +49,68 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
     def __init__(self, pool: AsyncConnectionPool) -> None:
         """Store the application-owned PostgreSQL pool."""
         self._pool = pool
+
+    @staticmethod
+    async def _lock_claimed_command(cursor, claimed):
+        """Lock Outbox then attempt and return one monotonic database time.
+
+        Provider-operations redrive takes the same lock order.  Validating the
+        persisted delivery cycle before touching the aggregate fences a stale
+        finalizer after a manual redrive has opened a newer cycle.
+        """
+        await cursor.execute(
+            """
+            SELECT status, delivery_cycle, attempts_in_cycle, lease_id,
+                   lease_owner, lease_expires_at, created_at, updated_at
+            FROM integration.outbox_messages
+            WHERE command_id = %s
+            FOR UPDATE
+            """,
+            (claimed.command_id,),
+        )
+        message = await cursor.fetchone()
+        await cursor.execute("SELECT clock_timestamp() AS now")
+        clock_row = await cursor.fetchone()
+        if message is None or clock_row is None:
+            raise LeaseConflictError(str(claimed.command_id))
+        database_now = clock_row["now"]
+        if (
+            message["status"] != "processing"
+            or message["delivery_cycle"] != claimed.delivery_cycle
+            or message["attempts_in_cycle"] != claimed.attempts_in_cycle
+            or message["lease_id"] != claimed.lease_id
+            or message["lease_owner"] != claimed.lease_owner
+            or message["lease_expires_at"] is None
+            or message["lease_expires_at"] <= database_now
+        ):
+            raise LeaseConflictError(str(claimed.command_id))
+        await cursor.execute(
+            """
+            SELECT delivery_cycle, attempt_number, lease_id, worker_id,
+                   started_at
+            FROM integration.outbox_delivery_attempts
+            WHERE attempt_id = %s AND command_id = %s AND finished_at IS NULL
+            FOR UPDATE
+            """,
+            (claimed.attempt.attempt_id, claimed.command_id),
+        )
+        attempt = await cursor.fetchone()
+        if (
+            attempt is None
+            or attempt["delivery_cycle"] != claimed.delivery_cycle
+            or attempt["delivery_cycle"] != claimed.attempt.delivery_cycle
+            or attempt["attempt_number"] != claimed.attempts_in_cycle
+            or attempt["attempt_number"] != claimed.attempt.attempt_number
+            or attempt["lease_id"] != claimed.lease_id
+            or attempt["worker_id"] != claimed.lease_owner
+        ):
+            raise LeaseConflictError(str(claimed.command_id))
+        return max(
+            database_now,
+            message["created_at"],
+            message["updated_at"],
+            attempt["started_at"],
+        )
 
     async def accepted(
         self, *, claimed: ClaimedOutboxMessage, result: ProviderCommandResult
@@ -106,12 +167,12 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
         error_message: str | None,
     ) -> None:
         """Apply one fenced aggregate transition and attempt/outbox completion."""
-        now = datetime.now(UTC)
         assert claimed.lease_id is not None and claimed.lease_owner is not None
         try:
             async with self._pool.connection() as connection:
                 async with connection.transaction():
                     async with connection.cursor(row_factory=dict_row) as cursor:
+                        now = await self._lock_claimed_command(cursor, claimed)
                         if claimed.aggregate_type == "order_operation":
                             await self._finalize_operation(
                                 cursor=cursor,
@@ -132,10 +193,14 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
                             )
                         outcome: Literal[
                             "accepted", "provider_rejected", "terminal_failure"
-                        ] = "accepted" if target == "published" else (
-                            "provider_rejected"
-                            if failure_kind == "provider_rejection"
-                            else "terminal_failure"
+                        ] = (
+                            "accepted"
+                            if target == "published"
+                            else (
+                                "provider_rejected"
+                                if failure_kind == "provider_rejection"
+                                else "terminal_failure"
+                            )
                         )
                         attempt_affected = await finish_delivery_attempt(
                             cursor,
@@ -167,7 +232,7 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
                             expected_status="processing",
                             expected_lease_id=claimed.lease_id,
                             expected_lease_owner=claimed.lease_owner or "",
-                                target_status=target,
+                            target_status=target,
                             updated_at=now,
                             published_at=now if target == "published" else None,
                             dead_at=now if target == "dead" else None,
@@ -180,9 +245,13 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
         except LeaseConflictError:
             raise
         except (errors.DatabaseError, PoolTimeout) as error:
-            raise IntegrationPersistenceError("Failed to finalize provider command") from error
+            raise IntegrationPersistenceError(
+                "Failed to finalize provider command"
+            ) from error
 
-    async def _finalize_operation(self, *, cursor, claimed, target, provider_result, failure_kind, now) -> None:
+    async def _finalize_operation(
+        self, *, cursor, claimed, target, provider_result, failure_kind, now
+    ) -> None:
         """Update an order operation, and create its technical-review case when needed."""
         await cursor.execute(
             f"SELECT {_OPERATION_COLUMNS} FROM case_management.order_operations WHERE operation_id = %s FOR UPDATE",
@@ -229,7 +298,7 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
             UPDATE case_management.order_operations
             SET requires_manual_review = %s, review_case_type = %s, review_priority = %s,
                 support_case_id = %s, provider_reference = %s, status = %s,
-                updated_at = %s, version = %s
+                updated_at = GREATEST(%s, updated_at, created_at), version = %s
             WHERE operation_id = %s AND version = %s
             """,
             (
@@ -249,7 +318,10 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
             raise LeaseConflictError(str(claimed.command_id))
         event = OrderOperationEvent(
             event_id=uuid4(),
-            idempotency_key=f"provider-command:{claimed.command_id}:status",
+            idempotency_key=(
+                f"provider-command:{claimed.command_id}:cycle:"
+                f"{claimed.delivery_cycle}:status"
+            ),
             operation_id=operation.operation_id,
             event_type="status_changed",
             previous_status=operation.status,
@@ -267,7 +339,10 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
         if new_status == "manual_review" and support_case_id is not None:
             attached = OrderOperationEvent(
                 event_id=uuid4(),
-                idempotency_key=f"provider-command:{claimed.command_id}:case-attached",
+                idempotency_key=(
+                    f"provider-command:{claimed.command_id}:cycle:"
+                    f"{claimed.delivery_cycle}:case-attached"
+                ),
                 operation_id=operation.operation_id,
                 event_type="support_case_attached",
                 support_case_id=support_case_id,
@@ -297,20 +372,32 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
         row = await cursor.fetchone()
         if row is not None:
             existing = _case_from_row(row)
-            reason_codes = tuple(dict.fromkeys((*existing.reason_codes, "provider_delivery_failed")))
+            reason_codes = tuple(
+                dict.fromkeys((*existing.reason_codes, "provider_delivery_failed"))
+            )
             await cursor.execute(
                 """
                 UPDATE case_management.support_cases
-                SET priority = 'p1', reason_codes = %s, updated_at = %s, version = %s
+                SET priority = 'p1', reason_codes = %s,
+                    updated_at = GREATEST(%s, updated_at, created_at), version = %s
                 WHERE case_id = %s AND version = %s
                 """,
-                (list(reason_codes), now, existing.version + 1, existing.case_id, existing.version),
+                (
+                    list(reason_codes),
+                    now,
+                    existing.version + 1,
+                    existing.case_id,
+                    existing.version,
+                ),
             )
             if cursor.rowcount != 1:
                 raise LeaseConflictError(str(claimed.command_id))
             event = SupportCaseEvent(
                 event_id=uuid4(),
-                idempotency_key=f"provider-command:{claimed.command_id}:technical-review",
+                idempotency_key=(
+                    f"provider-command:{claimed.command_id}:cycle:"
+                    f"{claimed.delivery_cycle}:technical-review"
+                ),
                 case_id=existing.case_id,
                 event_type="trigger_appended",
                 source_message_id=operation.source_message_id,
@@ -326,7 +413,7 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
                 created_at=now,
             )
             await cursor.execute(
-                f"INSERT INTO case_management.support_case_events ({_CASE_EVENT_COLUMNS}) VALUES ({', '.join(['%s'] * 24)}) ON CONFLICT (idempotency_key) DO NOTHING",
+                f"INSERT INTO case_management.support_case_events ({_CASE_EVENT_COLUMNS}) VALUES ({', '.join(['%s'] * 25)}) ON CONFLICT (idempotency_key) DO NOTHING",
                 _case_event_values(event),
             )
             return existing.case_id
@@ -351,7 +438,10 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
         )
         event = SupportCaseEvent(
             event_id=uuid4(),
-            idempotency_key=f"provider-command:{claimed.command_id}:technical-review",
+            idempotency_key=(
+                f"provider-command:{claimed.command_id}:cycle:"
+                f"{claimed.delivery_cycle}:technical-review"
+            ),
             case_id=case.case_id,
             event_type="case_created",
             source_message_id=case.source_message_id,
@@ -369,12 +459,14 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
             _case_values(case),
         )
         await cursor.execute(
-            f"INSERT INTO case_management.support_case_events ({_CASE_EVENT_COLUMNS}) VALUES ({', '.join(['%s'] * 24)})",
+            f"INSERT INTO case_management.support_case_events ({_CASE_EVENT_COLUMNS}) VALUES ({', '.join(['%s'] * 25)})",
             _case_event_values(event),
         )
         return case_id
 
-    async def _finalize_case(self, *, cursor, claimed, target, provider_result, failure_kind, now) -> None:
+    async def _finalize_case(
+        self, *, cursor, claimed, target, provider_result, failure_kind, now
+    ) -> None:
         """Append a provider update to the delivery-investigation aggregate."""
         await cursor.execute(
             f"SELECT {_CASE_COLUMNS} FROM case_management.support_cases WHERE case_id = %s FOR UPDATE",
@@ -384,7 +476,10 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
         if row is None:
             raise ValueError("provider command case was not found")
         case = _case_from_row(row)
-        if case.tenant_id != claimed.tenant_id or case.case_type != "delivery_investigation":
+        if (
+            case.tenant_id != claimed.tenant_id
+            or case.case_type != "delivery_investigation"
+        ):
             raise ValueError("provider command case association is invalid")
         status: Literal["accepted", "rejected"] = (
             "accepted" if target == "published" else "rejected"
@@ -395,7 +490,8 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
             await cursor.execute(
                 """
                 UPDATE case_management.support_cases
-                SET reason_codes = %s, updated_at = %s, version = %s
+                SET reason_codes = %s,
+                    updated_at = GREATEST(%s, updated_at, created_at), version = %s
                 WHERE case_id = %s AND version = %s
                 """,
                 (list(reason_codes), now, case.version + 1, case.case_id, case.version),
@@ -404,13 +500,18 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
                 raise LeaseConflictError(str(claimed.command_id))
         event = SupportCaseEvent(
             event_id=uuid4(),
-            idempotency_key=f"provider-command:{claimed.command_id}:{status}",
+            idempotency_key=(
+                f"provider-command:{claimed.command_id}:cycle:"
+                f"{claimed.delivery_cycle}:{status}"
+            ),
             case_id=case.case_id,
             event_type="provider_update",
             provider_command_id=claimed.command_id,
             provider_command_status=status,
             provider_reference=(
-                provider_result.provider_reference if provider_result is not None else None
+                provider_result.provider_reference
+                if provider_result is not None
+                else None
             ),
             actor="system",
             customer_id=case.customer_id,
@@ -418,6 +519,6 @@ class PostgresOutboxFinalizer(OutboxFinalizer):
             created_at=now,
         )
         await cursor.execute(
-            f"INSERT INTO case_management.support_case_events ({_CASE_EVENT_COLUMNS}) VALUES ({', '.join(['%s'] * 24)})",
+            f"INSERT INTO case_management.support_case_events ({_CASE_EVENT_COLUMNS}) VALUES ({', '.join(['%s'] * 25)})",
             _case_event_values(event),
         )

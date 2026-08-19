@@ -23,7 +23,9 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def _case(*, case_type: str = "delivery_investigation", order_id: str | None = "ORD-10010") -> SupportCase:
+def _case(
+    *, case_type: str = "delivery_investigation", order_id: str | None = "ORD-10010"
+) -> SupportCase:
     return SupportCase(
         case_id=CASE_ID,
         thread_id="thread-1",
@@ -177,7 +179,9 @@ async def test_case_atomic_write_rejects_mismatched_tenant() -> None:
     repository = InMemoryCaseRepository()
     case = _case()
     event = _created_event(case)
-    mismatched = _delivery_command(case).model_copy(update={"tenant_id": "tenant-other"})
+    mismatched = _delivery_command(case).model_copy(
+        update={"tenant_id": "tenant-other"}
+    )
 
     with pytest.raises(ValueError, match="tenant_id"):
         await repository.create_case_with_event_and_command(
@@ -228,7 +232,9 @@ async def test_case_atomic_write_rejects_tampered_idempotency_key() -> None:
     repository = InMemoryCaseRepository()
     case = _case()
     tampered = _delivery_command(case).model_copy(
-        update={"idempotency_key": "delivery-investigation:00000000-0000-0000-0000-000000000000"}
+        update={
+            "idempotency_key": "delivery-investigation:00000000-0000-0000-0000-000000000000"
+        }
     )
 
     with pytest.raises(ValueError, match="command envelope is invalid"):
@@ -283,3 +289,35 @@ async def test_case_atomic_write_rejects_tampered_command_type() -> None:
             command=tampered,
         )
     assert repository.outbox_commands == {}
+
+
+def test_provider_redrive_case_event_is_fixed_and_payload_free() -> None:
+    event = SupportCaseEvent(
+        event_id=uuid4(),
+        idempotency_key="provider-redrive:tenant-demo:redrive-1",
+        case_id=uuid4(),
+        event_type="provider_redrive",
+        provider_command_id=uuid4(),
+        provider_redrive_reason_code="dependency_or_configuration_restored",
+        actor="tenant-demo:supervisor-a",
+        customer_id="customer-a",
+        tenant_id="tenant-demo",
+        created_at=NOW,
+    )
+
+    assert event.provider_reference is None
+    assert event.provider_command_status is None
+    assert "payload" not in SupportCaseEvent.model_fields
+
+    with pytest.raises(ValidationError, match="provider result fields"):
+        SupportCaseEvent.model_validate(
+            {**event.model_dump(), "provider_reference": "provider-ref-sensitive"}
+        )
+
+    with pytest.raises(ValidationError, match="only provider_redrive"):
+        SupportCaseEvent.model_validate(
+            {
+                **_created_event(_case()).model_dump(),
+                "provider_redrive_reason_code": "manual_retry_approved",
+            }
+        )

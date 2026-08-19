@@ -16,10 +16,13 @@ from agent.integrations.persistence_models import (
     ClaimedOutboxMessage,
     InboxMessage,
     InboxProcessingAttempt,
+    InboxRedrive,
     OutboxDeliveryAttempt,
     OutboxMessage,
     OutboxRedrive,
 )
+from agent.integrations.postgres_repository import PostgresIntegrationRepository
+from agent.integrations.repository import IntegrationRepository
 from agent.operations.models import OrderOperation
 
 NOW = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
@@ -148,6 +151,35 @@ def _inbox_attempt(**overrides: object) -> InboxProcessingAttempt:
     }
     values.update(overrides)
     return InboxProcessingAttempt.model_validate(values)
+
+
+def test_inbox_processing_cycles_are_bounded_and_audited() -> None:
+    inbox = _inbox(processing_attempts=8, processing_cycle=2, attempts_in_cycle=3)
+    attempt = _inbox_attempt(processing_cycle=2, attempt_number=8)
+    audit = InboxRedrive(
+        redrive_id=uuid4(),
+        inbox_id=inbox.inbox_id,
+        tenant_id=inbox.tenant_id,
+        request_id="ops:req-8",
+        requested_by="tenant-demo:supervisor-a",
+        reason_code="manual_retry_approved",
+        previous_cycle=1,
+        new_cycle=2,
+        created_at=NOW,
+    )
+
+    assert inbox.processing_attempts == 8
+    assert inbox.attempts_in_cycle == 3
+    assert attempt.processing_cycle == 2
+    assert audit.reason_code == "manual_retry_approved"
+
+    with pytest.raises(ValidationError, match="less than or equal to 5"):
+        _inbox(attempts_in_cycle=6)
+
+    with pytest.raises(ValidationError, match="new_cycle"):
+        InboxRedrive.model_validate(
+            audit.model_copy(update={"new_cycle": 3}).model_dump()
+        )
 
 
 def test_pending_outbox_is_valid_without_lease() -> None:
@@ -412,3 +444,9 @@ def test_claim_parameters_reject_invalid_values() -> None:
             worker_id="w", batch_size=1, lease_seconds=float("inf")
         )
     _validate_claim_parameters(worker_id="w", batch_size=1, lease_seconds=0.5)
+
+
+def test_low_level_manual_outbox_redrive_is_not_publicly_exposed() -> None:
+    """Only the policy/aggregate-aware Provider Ops coordinator may redrive."""
+    assert not hasattr(IntegrationRepository, "redrive_dead_outbox")
+    assert not hasattr(PostgresIntegrationRepository, "redrive_dead_outbox")
