@@ -1,5 +1,7 @@
 # LangGraph Refund Agent
 
+[English](#langgraph-refund-agent) | [中文](#langgraph-退款-agent)
+
 [![CI](https://github.com/aekie777-leon/langgraph-refund-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/aekie777-leon/langgraph-refund-agent/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2F855A.svg)](LICENSE)
@@ -746,9 +748,78 @@ Released under the MIT License. See `LICENSE`.
 
 # LangGraph 退款 Agent
 
-这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别订单操作、退款申请、订单查询、物流问题和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断业务资格，在会改变状态的操作前请求用户确认，并把订单操作、退款申请、人工工单和不可变事件保存到 PostgreSQL。
+[English](#langgraph-refund-agent) | [中文](#langgraph-退款-agent)
 
-版本：`0.9.0`
+这是一个面向生产工程实践的多租户客服 Agent，使用 LangGraph、FastAPI、
+PostgreSQL、React 以及事务型 Outbox/Inbox Worker 构建。系统以确定性策略作出
+业务判断，在改变状态前要求人工确认，并明确划分身份、租户、重试和审计边界。
+
+版本：`1.0.0`
+
+> **作品集范围：** 本仓库使用合成本地数据展示生产工程实践，但未部署到真实
+> 生产环境；其中的模型、安全策略和本地基础设施不构成生产就绪声明。
+
+![OpsPilot 本地 Showcase 控制台](docs/assets/showcase-console.png)
+
+## 五分钟审阅项目
+
+1. 启动无需云端密钥的[本地 Showcase](docs/v1.0_showcase.md)，运行一次真实的
+   Graph interrupt/resume 流程。
+2. 查看[版本化 AI 评测](docs/v1.0_evaluation.md)：57 个中英文场景、确定性安全
+   门禁，以及已提交的 JSON 证据。
+3. 触发[故障演示](docs/v1.0_observability.md)：Provider HTTP 500、持久化重试、
+   成功投递、签名 webhook 和 Inbox 完成。
+4. 通过 [v1.0 发布地图](docs/v1.0_release.md)追踪架构、安全决策、测试证据和
+   有意延期的生产工作。
+
+## 工程证据
+
+| 领域 | 仓库中的证据 |
+|---|---|
+| Agent 设计 | LangGraph 状态机、结构化模型输出、确定性策略节点、human-in-the-loop interrupt |
+| 后端 | 异步 FastAPI 边界、严格 Pydantic 契约、PostgreSQL Repository、幂等与乐观并发 |
+| 分布式可靠性 | 事务型 Outbox/Inbox、lease 与 fencing、有界重试、签名回调、可安全重放的处理与 redrive |
+| 身份与安全 | OIDC/JWT 验证、JWKS 轮换、服务端推导 RBAC、租户隔离、只读 SCIM 分配校验 |
+| AI 安全与评测 | 双语版本化数据集、真实路由函数评测、负向边界、可复现 CI artifact |
+| 产品演示 | React/TypeScript 控制台、Docker Compose 栈、按 persona 限定的工单与 Provider 运维视图 |
+| 质量 | Python 3.11/3.12 真实 PostgreSQL CI、Ruff、mypy、pytest、ESLint、Vitest、Playwright、包与容器检查 |
+
+## 架构
+
+```mermaid
+flowchart LR
+    UI[React Showcase 控制台] -->|Bearer Token| API[LangGraph Server + FastAPI]
+    API --> AUTH[OIDC/JWKS runtime\nRBAC + 租户范围]
+    API --> GRAPH[LangGraph 工作流\n结构化 AI + 确定性策略]
+    GRAPH -->|interrupt / resume| UI
+    GRAPH --> DB[(PostgreSQL\n领域数据 + 审计 + 队列)]
+    DB --> OUT[Outbox Worker]
+    OUT -->|签名命令| PROVIDER[Provider adapter\nShowcase 使用本地 simulator]
+    PROVIDER -->|HMAC callback| API
+    API --> DB
+    DB --> IN[Inbox Worker]
+    IN --> DB
+    API --> OPS[工单 + Provider Ops API]
+```
+
+本地作品集 profile 使用确定性的模型适配器、合成身份和仅 loopback 可访问的端口，
+运行上图全部组件。生产 profile 则会 fail closed，除非 OIDC、SCIM、TLS
+PostgreSQL 和安全 Provider 传输要求全部满足。
+
+## v1.0.0 新增内容
+
+- 新增自包含 React/TypeScript 运维控制台，并连接真实 LangGraph 工作流、
+  PostgreSQL Repository、受权限约束的内部 API 和两个带 fencing 的 Worker；
+- 提供适合招聘方快速审阅的退款、人工审核、投诉、工单分配、Provider 生命周期
+  和风险转人工证据路径；
+- 新增 57 个版本化双语 AI 与安全场景、确定性发布门禁，以及由 CI 验证的可复现
+  Markdown/JSON 证据；
+- 通过持久化的 `retry_scheduled`、`accepted` 和 `processed` attempt 历史演示真实
+  Provider 瞬时故障，同时不暴露 payload 或凭据；
+- 新增前端 lint、单元测试和生产构建 CI，并保留 Python 3.11/3.12 与真实
+  PostgreSQL 测试矩阵；
+- 保持 migration `0001`–`0008`、Graph workflow、Provider wire contract、
+  v0.9 身份边界和全部现有领域 API 不变。
 
 ## v0.9.0 新增内容
 
@@ -1052,6 +1123,12 @@ uv sync --extra dev
 ```
 
 复制环境变量模板：
+
+```bash
+cp .env.example .env
+```
+
+在 PowerShell 中：
 
 ```powershell
 Copy-Item .env.example .env
