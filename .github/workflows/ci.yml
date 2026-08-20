@@ -54,5 +54,31 @@ jobs:
         run: uv run mypy src
       - name: Test
         run: uv run pytest
+      - name: Verify AI evaluation evidence
+        run: uv run python -m agent.evals --verify-json docs/assets/evaluation-report.json --quiet
       - name: Build package
         run: uv build
+
+  showcase-ui:
+    name: Showcase UI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo-ui
+
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: demo-ui/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build

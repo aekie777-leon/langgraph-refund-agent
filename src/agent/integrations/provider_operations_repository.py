@@ -5,6 +5,7 @@ from uuid import UUID
 
 from agent.auth.models import AccessScope
 from agent.integrations.provider_operations_contracts import (
+    ProviderAttemptActivityFeed,
     ProviderInboxDetail,
     ProviderOutboxDetail,
     ProviderQueueOverview,
@@ -35,6 +36,11 @@ class ProviderOperationsRepository(Protocol):
 
     async def get_queue_overview(self, scope: AccessScope) -> ProviderQueueOverview:
         """Return tenant-scoped queue aggregates."""
+
+    async def get_attempt_activity(
+        self, scope: AccessScope, *, limit: int = 50
+    ) -> ProviderAttemptActivityFeed:
+        """Return a bounded payload-free timeline of recent attempts."""
 
     async def get_outbox_detail(
         self, scope: AccessScope, command_id: UUID, *, history_limit: int = 50

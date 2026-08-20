@@ -270,6 +270,9 @@ class OutboxDispatchWorker:
                     error_message=safe_message,
                     retry_after_seconds=decision.retry_after_seconds,
                     next_available_at=self._clock() + timedelta(seconds=decision.delay_seconds),
+                    http_status=(
+                        error.status_code if isinstance(error, HTTPStatusError) else None
+                    ),
                 )
                 return WorkerRunResult(retried=1)
         except OutboxAttemptsExhaustedError:

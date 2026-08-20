@@ -19,6 +19,8 @@ from agent.integrations.provider_operations_api_errors import (
     register_provider_operations_exception_handlers,
 )
 from agent.integrations.provider_operations_contracts import (
+    ProviderAttemptActivity,
+    ProviderAttemptActivityFeed,
     ProviderInboxDetail,
     ProviderInboxQueueSummary,
     ProviderOutboxDetail,
@@ -66,6 +68,27 @@ def _overview() -> ProviderQueueOverview:
         inbox=(
             ProviderInboxQueueSummary(
                 status="failed", count=1, oldest_available_at=NOW
+            ),
+        ),
+        generated_at=NOW,
+    )
+
+
+def _activity() -> ProviderAttemptActivityFeed:
+    return ProviderAttemptActivityFeed(
+        items=(
+            ProviderAttemptActivity(
+                queue="outbox",
+                resource_id=COMMAND_ID,
+                command_id=COMMAND_ID,
+                cycle=1,
+                attempt_number=1,
+                outcome="retry_scheduled",
+                failure_kind="http_retryable",
+                http_status=500,
+                safe_error_code="provider_http_500",
+                started_at=NOW,
+                finished_at=NOW,
             ),
         ),
         generated_at=NOW,
@@ -121,6 +144,7 @@ def _inbox_detail() -> ProviderInboxDetail:
 def _service_mock() -> AsyncMock:
     service = AsyncMock(spec=ProviderOperationsService)
     service.get_queue_overview.return_value = _overview()
+    service.get_attempt_activity.return_value = _activity()
     service.get_outbox_detail.return_value = _outbox_detail()
     service.get_inbox_detail.return_value = _inbox_detail()
     service.redrive_outbox.return_value = _redrive()
@@ -154,7 +178,7 @@ def test_provider_error_registration_preserves_existing_shared_forbidden_handler
     assert app.exception_handlers[ForbiddenError] is shared_handler
 
 
-async def test_all_five_routes_delegate_exact_typed_arguments() -> None:
+async def test_all_six_routes_delegate_exact_typed_arguments() -> None:
     service = _service_mock()
     app = _app_with_service(service)
 
@@ -162,6 +186,9 @@ async def test_all_five_routes_delegate_exact_typed_arguments() -> None:
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         queues = await client.get("/internal/provider-operations/queues")
+        activity = await client.get(
+            "/internal/provider-operations/attempts", params={"limit": 7}
+        )
         outbox = await client.get(
             f"/internal/provider-operations/outbox/{COMMAND_ID}",
             params={"history_limit": 7},
@@ -178,21 +205,38 @@ async def test_all_five_routes_delegate_exact_typed_arguments() -> None:
 
     assert [
         queues.status_code,
+        activity.status_code,
         outbox.status_code,
         inbox.status_code,
         outbox_redrive.status_code,
         inbox_redrive.status_code,
-    ] == [200, 200, 200, 200, 200]
+    ] == [200, 200, 200, 200, 200, 200]
     assert queues.json()["outbox"][0] == {
         "status": "dead",
         "count": 2,
         "oldest_available_at": NOW.isoformat().replace("+00:00", "Z"),
     }
     assert outbox.json()["command_id"] == str(COMMAND_ID)
+    assert activity.json()["items"][0] == {
+        "queue": "outbox",
+        "resource_id": str(COMMAND_ID),
+        "command_id": str(COMMAND_ID),
+        "cycle": 1,
+        "attempt_number": 1,
+        "outcome": "retry_scheduled",
+        "failure_kind": "http_retryable",
+        "http_status": 500,
+        "safe_error_code": "provider_http_500",
+        "started_at": NOW.isoformat().replace("+00:00", "Z"),
+        "finished_at": NOW.isoformat().replace("+00:00", "Z"),
+    }
     assert inbox.json()["inbox_id"] == str(INBOX_ID)
     assert outbox_redrive.json() == inbox_redrive.json()
 
     service.get_queue_overview.assert_awaited_once_with(SUPERVISOR_SCOPE)
+    service.get_attempt_activity.assert_awaited_once_with(
+        SUPERVISOR_SCOPE, limit=7
+    )
     service.get_outbox_detail.assert_awaited_once_with(
         SUPERVISOR_SCOPE, COMMAND_ID, history_limit=7
     )
@@ -468,16 +512,34 @@ async def test_history_limit_upper_bound_is_rejected() -> None:
     assert response.status_code == 422
 
 
+async def test_activity_limit_is_bounded_and_sanitized() -> None:
+    app = _app_with_service(_service_mock())
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            "/internal/provider-operations/attempts",
+            params={"limit": 101, "tenant_id": "ignored-secret-tenant"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "provider_operations_request_invalid"
+    assert "ignored-secret-tenant" not in response.text
+
+
 def test_openapi_has_exact_safe_provider_operations_surface() -> None:
     schema = _app_with_service(_service_mock()).openapi()
     assert set(schema["paths"]) == {
         "/internal/provider-operations/queues",
+        "/internal/provider-operations/attempts",
         "/internal/provider-operations/outbox/{command_id}",
         "/internal/provider-operations/inbox/{inbox_id}",
         "/internal/provider-operations/outbox/{command_id}/redrives",
         "/internal/provider-operations/inbox/{inbox_id}/redrives",
     }
     assert set(schema["paths"]["/internal/provider-operations/queues"]) == {"get"}
+    assert set(schema["paths"]["/internal/provider-operations/attempts"]) == {"get"}
     assert set(
         schema["paths"]["/internal/provider-operations/outbox/{command_id}"]
     ) == {"get"}

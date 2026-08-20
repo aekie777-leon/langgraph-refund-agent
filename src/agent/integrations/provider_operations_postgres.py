@@ -16,6 +16,8 @@ from agent.cases.models import SupportCaseEvent
 from agent.cases.postgres_repository import _EVENT_COLUMNS as _CASE_EVENT_COLUMNS
 from agent.cases.postgres_repository import _event_values as _case_event_values
 from agent.integrations.provider_operations_contracts import (
+    ProviderAttemptActivity,
+    ProviderAttemptActivityFeed,
     ProviderInboxAttemptView,
     ProviderInboxDetail,
     ProviderInboxQueueSummary,
@@ -105,6 +107,16 @@ def _inbox_attempt_view(row: Mapping[str, Any]) -> ProviderInboxAttemptView:
     return ProviderInboxAttemptView.model_validate(values)
 
 
+def _attempt_activity_view(row: Mapping[str, Any]) -> ProviderAttemptActivity:
+    values = dict(row)
+    values["safe_error_code"] = _safe_error_code(row["safe_error_code"])
+    status = row["http_status"]
+    values["http_status"] = (
+        status if isinstance(status, int) and 100 <= status <= 599 else None
+    )
+    return ProviderAttemptActivity.model_validate(values)
+
+
 def _not_found() -> NoReturn:
     raise ProviderOperationsNotFoundError("provider_resource_not_found")
 
@@ -165,6 +177,78 @@ class PostgresProviderOperationsRepository(ProviderOperationsRepository):
             inbox=tuple(
                 ProviderInboxQueueSummary.model_validate(row) for row in inbox_rows
             ),
+            generated_at=now["generated_at"],
+        )
+
+    async def get_attempt_activity(
+        self, scope: AccessScope, *, limit: int = 50
+    ) -> ProviderAttemptActivityFeed:
+        """Return recent attempt metadata without payload or identity fields."""
+        _authorize(scope, "provider_ops:read")
+        _validate_history_limit(limit)
+        try:
+            async with self._pool.connection() as connection:
+                async with connection.cursor(row_factory=dict_row) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT queue, resource_id, command_id, cycle,
+                               attempt_number, outcome, failure_kind,
+                               http_status, safe_error_code, started_at,
+                               finished_at
+                        FROM (
+                            SELECT 'outbox'::text AS queue,
+                                   a.command_id AS resource_id,
+                                   a.command_id,
+                                   a.delivery_cycle AS cycle,
+                                   a.attempt_number,
+                                   a.outcome,
+                                   a.failure_kind,
+                                   a.http_status,
+                                   a.safe_error_code,
+                                   a.started_at,
+                                   a.finished_at
+                            FROM integration.outbox_delivery_attempts AS a
+                            JOIN integration.outbox_messages AS m
+                              ON m.command_id = a.command_id
+                            WHERE m.tenant_id = %s
+
+                            UNION ALL
+
+                            SELECT 'inbox'::text AS queue,
+                                   a.inbox_id AS resource_id,
+                                   m.command_id,
+                                   a.processing_cycle AS cycle,
+                                   a.attempt_number,
+                                   a.outcome,
+                                   NULL::text AS failure_kind,
+                                   NULL::integer AS http_status,
+                                   a.safe_error_code,
+                                   a.started_at,
+                                   a.finished_at
+                            FROM integration.inbox_processing_attempts AS a
+                            JOIN integration.inbox_messages AS m
+                              ON m.inbox_id = a.inbox_id
+                            WHERE m.tenant_id = %s
+                        ) AS activity
+                        ORDER BY started_at DESC, resource_id DESC,
+                                 attempt_number DESC
+                        LIMIT %s
+                        """,
+                        (scope.tenant_id, scope.tenant_id, limit),
+                    )
+                    rows = await cursor.fetchall()
+                    await cursor.execute("SELECT clock_timestamp() AS generated_at")
+                    now = await cursor.fetchone()
+        except ValueError:
+            raise
+        except (errors.DatabaseError, PoolTimeout) as error:
+            raise ProviderOperationsPersistenceError(
+                "provider_operations_read_failed"
+            ) from error
+        if now is None:
+            raise ProviderOperationsPersistenceError("provider_operations_read_failed")
+        return ProviderAttemptActivityFeed(
+            items=tuple(_attempt_activity_view(row) for row in rows),
             generated_at=now["generated_at"],
         )
 

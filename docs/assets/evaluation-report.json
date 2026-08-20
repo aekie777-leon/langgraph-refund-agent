@@ -1,0 +1,1286 @@
+{
+  "coverage": {
+    "languages": [
+      "en",
+      "zh"
+    ],
+    "safety_categories": [
+      "legal",
+      "regulatory",
+      "reputation",
+      "self_harm",
+      "violence"
+    ],
+    "scenario_tags": [
+      "ambiguous",
+      "cancellation",
+      "case",
+      "complaint",
+      "delivery",
+      "entity",
+      "exchange",
+      "formal",
+      "handoff",
+      "hard-critical",
+      "intent",
+      "legal",
+      "manual-review",
+      "negative-boundary",
+      "noncritical-risk",
+      "normalization",
+      "operation",
+      "order",
+      "order-id",
+      "refund",
+      "regulatory",
+      "reputation",
+      "return",
+      "risk-signal",
+      "safety",
+      "self-harm",
+      "semantic",
+      "staff-conduct",
+      "violence",
+      "workflow"
+    ]
+  },
+  "dataset_digest": "7f6a1e23fea9a86677efba758da80b3171254749b222c8d72fee6734addeab5e",
+  "dataset_version": "1.0.0",
+  "gates": [
+    {
+      "name": "overall_pass_rate",
+      "observed": 1.0,
+      "passed": true,
+      "threshold": 1.0
+    },
+    {
+      "name": "safety_pass_rate",
+      "observed": 1.0,
+      "passed": true,
+      "threshold": 1.0
+    },
+    {
+      "name": "required_language_coverage",
+      "observed": 1.0,
+      "passed": true,
+      "threshold": 1.0
+    }
+  ],
+  "pass_rate": 1.0,
+  "passed": 57,
+  "results": [
+    {
+      "actual": {
+        "human_handoff_requested": false,
+        "intent": "refund_request"
+      },
+      "expected": {
+        "human_handoff_requested": false,
+        "intent": "refund_request"
+      },
+      "id": "routing-refund-en",
+      "language": "en",
+      "passed": true,
+      "suite": "routing",
+      "tags": [
+        "intent",
+        "refund"
+      ]
+    },
+    {
+      "actual": {
+        "human_handoff_requested": false,
+        "intent": "cancellation_request"
+      },
+      "expected": {
+        "human_handoff_requested": false,
+        "intent": "cancellation_request"
+      },
+      "id": "routing-cancel-en",
+      "language": "en",
+      "passed": true,
+      "suite": "routing",
+      "tags": [
+        "intent",
+        "operation"
+      ]
+    },
+    {
+      "actual": {
+        "human_handoff_requested": false,
+        "intent": "return_request"
+      },
+      "expected": {
+        "human_handoff_requested": false,
+        "intent": "return_request"
+      },
+      "id": "routing-return-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "routing",
+      "tags": [
+        "intent",
+        "operation"
+      ]
+    },
+    {
+      "actual": {
+        "human_handoff_requested": false,
+        "intent": "exchange_request"
+      },
+      "expected": {
+        "human_handoff_requested": false,
+        "intent": "exchange_request"
+      },
+      "id": "routing-exchange-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "routing",
+      "tags": [
+        "intent",
+        "operation"
+      ]
+    },
+    {
+      "actual": {
+        "human_handoff_requested": false,
+        "intent": "delivery_issue"
+      },
+      "expected": {
+        "human_handoff_requested": false,
+        "intent": "delivery_issue"
+      },
+      "id": "routing-delivery-en",
+      "language": "en",
+      "passed": true,
+      "suite": "routing",
+      "tags": [
+        "intent",
+        "delivery"
+      ]
+    },
+    {
+      "actual": {
+        "human_handoff_requested": false,
+        "intent": "complaint"
+      },
+      "expected": {
+        "human_handoff_requested": false,
+        "intent": "complaint"
+      },
+      "id": "routing-complaint-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "routing",
+      "tags": [
+        "intent",
+        "complaint"
+      ]
+    },
+    {
+      "actual": {
+        "human_handoff_requested": true,
+        "intent": "complaint"
+      },
+      "expected": {
+        "human_handoff_requested": true,
+        "intent": "complaint"
+      },
+      "id": "routing-handoff-en",
+      "language": "en",
+      "passed": true,
+      "suite": "routing",
+      "tags": [
+        "intent",
+        "handoff"
+      ]
+    },
+    {
+      "actual": {
+        "human_handoff_requested": false,
+        "intent": "support_case_status"
+      },
+      "expected": {
+        "human_handoff_requested": false,
+        "intent": "support_case_status"
+      },
+      "id": "routing-case-status-en",
+      "language": "en",
+      "passed": true,
+      "suite": "routing",
+      "tags": [
+        "intent",
+        "case"
+      ]
+    },
+    {
+      "actual": {
+        "human_handoff_requested": false,
+        "intent": "order_inquiry"
+      },
+      "expected": {
+        "human_handoff_requested": false,
+        "intent": "order_inquiry"
+      },
+      "id": "routing-order-status-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "routing",
+      "tags": [
+        "intent",
+        "order"
+      ]
+    },
+    {
+      "actual": {
+        "order_id": "ORD-10001"
+      },
+      "expected": {
+        "order_id": "ORD-10001"
+      },
+      "id": "order-detection-uppercase-en",
+      "language": "en",
+      "passed": true,
+      "suite": "order_detection",
+      "tags": [
+        "entity",
+        "order-id"
+      ]
+    },
+    {
+      "actual": {
+        "order_id": "ORD-10002"
+      },
+      "expected": {
+        "order_id": "ORD-10002"
+      },
+      "id": "order-detection-lowercase-en",
+      "language": "en",
+      "passed": true,
+      "suite": "order_detection",
+      "tags": [
+        "entity",
+        "normalization"
+      ]
+    },
+    {
+      "actual": {
+        "order_id": null
+      },
+      "expected": {
+        "order_id": null
+      },
+      "id": "order-detection-partial-en",
+      "language": "en",
+      "passed": true,
+      "suite": "order_detection",
+      "tags": [
+        "entity",
+        "negative-boundary"
+      ]
+    },
+    {
+      "actual": {
+        "order_id": "ORD-10003"
+      },
+      "expected": {
+        "order_id": "ORD-10003"
+      },
+      "id": "order-detection-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "order_detection",
+      "tags": [
+        "entity",
+        "order-id"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "self_harm"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [
+          "self_harm"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "id": "risk-hard-self-harm-en",
+      "language": "en",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "hard-critical",
+        "self-harm"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "self_harm"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [
+          "self_harm"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "id": "risk-hard-self-harm-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "hard-critical",
+        "self-harm"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "violence"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [
+          "violence"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "id": "risk-hard-violence-en",
+      "language": "en",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "hard-critical",
+        "violence"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "violence"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [
+          "violence"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "id": "risk-hard-violence-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "hard-critical",
+        "violence"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "legal"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [
+          "legal"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "id": "risk-hard-legal-en",
+      "language": "en",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "hard-critical",
+        "legal"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "legal"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [
+          "legal"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "id": "risk-hard-legal-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "hard-critical",
+        "legal"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "regulatory"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [
+          "regulatory"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "id": "risk-hard-regulatory-en",
+      "language": "en",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "hard-critical",
+        "regulatory"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "regulatory"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [
+          "regulatory"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "id": "risk-hard-regulatory-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "hard-critical",
+        "regulatory"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "reputation"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [
+          "reputation"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "id": "risk-hard-reputation-en",
+      "language": "en",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "hard-critical",
+        "reputation"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "reputation"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [
+          "reputation"
+        ],
+        "hard_critical": true,
+        "has_risk_signals": false
+      },
+      "id": "risk-hard-reputation-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "hard-critical",
+        "reputation"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "self_harm"
+        ],
+        "hard_critical": false,
+        "has_risk_signals": true
+      },
+      "expected": {
+        "categories": [
+          "self_harm"
+        ],
+        "hard_critical": false,
+        "has_risk_signals": true
+      },
+      "id": "risk-signal-self-harm-en",
+      "language": "en",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "risk-signal",
+        "normalization",
+        "self-harm"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "violence"
+        ],
+        "hard_critical": false,
+        "has_risk_signals": true
+      },
+      "expected": {
+        "categories": [
+          "violence"
+        ],
+        "hard_critical": false,
+        "has_risk_signals": true
+      },
+      "id": "risk-signal-violence-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "risk-signal",
+        "violence"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "legal"
+        ],
+        "hard_critical": false,
+        "has_risk_signals": true
+      },
+      "expected": {
+        "categories": [
+          "legal"
+        ],
+        "hard_critical": false,
+        "has_risk_signals": true
+      },
+      "id": "risk-signal-legal-en",
+      "language": "en",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "risk-signal",
+        "legal"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "regulatory"
+        ],
+        "hard_critical": false,
+        "has_risk_signals": true
+      },
+      "expected": {
+        "categories": [
+          "regulatory"
+        ],
+        "hard_critical": false,
+        "has_risk_signals": true
+      },
+      "id": "risk-signal-regulatory-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "risk-signal",
+        "regulatory"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "reputation"
+        ],
+        "hard_critical": false,
+        "has_risk_signals": true
+      },
+      "expected": {
+        "categories": [
+          "reputation"
+        ],
+        "hard_critical": false,
+        "has_risk_signals": true
+      },
+      "id": "risk-signal-reputation-en",
+      "language": "en",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "risk-signal",
+        "reputation"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [],
+        "hard_critical": false,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [],
+        "hard_critical": false,
+        "has_risk_signals": false
+      },
+      "id": "risk-negative-idiom-en",
+      "language": "en",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "negative-boundary",
+        "safety"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [],
+        "hard_critical": false,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [],
+        "hard_critical": false,
+        "has_risk_signals": false
+      },
+      "id": "risk-negative-policy-en",
+      "language": "en",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "negative-boundary",
+        "safety"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [],
+        "hard_critical": false,
+        "has_risk_signals": false
+      },
+      "expected": {
+        "categories": [],
+        "hard_critical": false,
+        "has_risk_signals": false
+      },
+      "id": "risk-negative-refund-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "risk_rules",
+      "tags": [
+        "negative-boundary",
+        "safety"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "regulatory"
+        ],
+        "risk_level": "medium"
+      },
+      "expected": {
+        "categories": [
+          "regulatory"
+        ],
+        "risk_level": "medium"
+      },
+      "id": "semantic-regulatory-en",
+      "language": "en",
+      "passed": true,
+      "suite": "semantic_risk",
+      "tags": [
+        "semantic",
+        "regulatory"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "regulatory"
+        ],
+        "risk_level": "medium"
+      },
+      "expected": {
+        "categories": [
+          "regulatory"
+        ],
+        "risk_level": "medium"
+      },
+      "id": "semantic-regulatory-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "semantic_risk",
+      "tags": [
+        "semantic",
+        "regulatory"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "violence"
+        ],
+        "risk_level": "high"
+      },
+      "expected": {
+        "categories": [
+          "violence"
+        ],
+        "risk_level": "high"
+      },
+      "id": "semantic-violence-en",
+      "language": "en",
+      "passed": true,
+      "suite": "semantic_risk",
+      "tags": [
+        "semantic",
+        "violence"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "violence"
+        ],
+        "risk_level": "high"
+      },
+      "expected": {
+        "categories": [
+          "violence"
+        ],
+        "risk_level": "high"
+      },
+      "id": "semantic-violence-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "semantic_risk",
+      "tags": [
+        "semantic",
+        "violence"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [
+          "self_harm"
+        ],
+        "risk_level": "medium"
+      },
+      "expected": {
+        "categories": [
+          "self_harm"
+        ],
+        "risk_level": "medium"
+      },
+      "id": "semantic-self-harm-en",
+      "language": "en",
+      "passed": true,
+      "suite": "semantic_risk",
+      "tags": [
+        "semantic",
+        "self-harm"
+      ]
+    },
+    {
+      "actual": {
+        "categories": [],
+        "risk_level": "none"
+      },
+      "expected": {
+        "categories": [],
+        "risk_level": "none"
+      },
+      "id": "semantic-none-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "semantic_risk",
+      "tags": [
+        "semantic",
+        "negative-boundary"
+      ]
+    },
+    {
+      "actual": {
+        "complaint_kind": "staff_conduct",
+        "staff_complaint_severity": "medium"
+      },
+      "expected": {
+        "complaint_kind": "staff_conduct",
+        "staff_complaint_severity": "medium"
+      },
+      "id": "complaint-staff-en",
+      "language": "en",
+      "passed": true,
+      "suite": "formal_complaint",
+      "tags": [
+        "complaint",
+        "staff-conduct"
+      ]
+    },
+    {
+      "actual": {
+        "complaint_kind": "staff_conduct",
+        "staff_complaint_severity": "medium"
+      },
+      "expected": {
+        "complaint_kind": "staff_conduct",
+        "staff_complaint_severity": "medium"
+      },
+      "id": "complaint-staff-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "formal_complaint",
+      "tags": [
+        "complaint",
+        "staff-conduct"
+      ]
+    },
+    {
+      "actual": {
+        "complaint_kind": "other_formal",
+        "staff_complaint_severity": null
+      },
+      "expected": {
+        "complaint_kind": "other_formal",
+        "staff_complaint_severity": null
+      },
+      "id": "complaint-formal-en",
+      "language": "en",
+      "passed": true,
+      "suite": "formal_complaint",
+      "tags": [
+        "complaint",
+        "formal"
+      ]
+    },
+    {
+      "actual": {
+        "complaint_kind": "other_formal",
+        "staff_complaint_severity": null
+      },
+      "expected": {
+        "complaint_kind": "other_formal",
+        "staff_complaint_severity": null
+      },
+      "id": "complaint-formal-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "formal_complaint",
+      "tags": [
+        "complaint",
+        "formal"
+      ]
+    },
+    {
+      "actual": {
+        "complaint_kind": "ordinary",
+        "staff_complaint_severity": null
+      },
+      "expected": {
+        "complaint_kind": "ordinary",
+        "staff_complaint_severity": null
+      },
+      "id": "complaint-ordinary-en",
+      "language": "en",
+      "passed": true,
+      "suite": "formal_complaint",
+      "tags": [
+        "complaint",
+        "negative-boundary"
+      ]
+    },
+    {
+      "actual": {
+        "ambiguous": false,
+        "delivery_issue_type": null,
+        "operation_type": "cancellation",
+        "reason": "no_longer_needed",
+        "replacement_variant_id": null
+      },
+      "expected": {
+        "ambiguous": false,
+        "delivery_issue_type": null,
+        "operation_type": "cancellation",
+        "reason": "no_longer_needed",
+        "replacement_variant_id": null
+      },
+      "id": "operation-cancel-en",
+      "language": "en",
+      "passed": true,
+      "suite": "operation_extraction",
+      "tags": [
+        "operation",
+        "cancellation"
+      ]
+    },
+    {
+      "actual": {
+        "ambiguous": false,
+        "delivery_issue_type": null,
+        "operation_type": "cancellation",
+        "reason": "no_longer_needed",
+        "replacement_variant_id": null
+      },
+      "expected": {
+        "ambiguous": false,
+        "delivery_issue_type": null,
+        "operation_type": "cancellation",
+        "reason": "no_longer_needed",
+        "replacement_variant_id": null
+      },
+      "id": "operation-cancel-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "operation_extraction",
+      "tags": [
+        "operation",
+        "cancellation"
+      ]
+    },
+    {
+      "actual": {
+        "ambiguous": false,
+        "delivery_issue_type": null,
+        "operation_type": "return",
+        "reason": "changed_mind",
+        "replacement_variant_id": null
+      },
+      "expected": {
+        "ambiguous": false,
+        "delivery_issue_type": null,
+        "operation_type": "return",
+        "reason": "changed_mind",
+        "replacement_variant_id": null
+      },
+      "id": "operation-return-en",
+      "language": "en",
+      "passed": true,
+      "suite": "operation_extraction",
+      "tags": [
+        "operation",
+        "return"
+      ]
+    },
+    {
+      "actual": {
+        "ambiguous": false,
+        "delivery_issue_type": null,
+        "operation_type": "exchange",
+        "reason": "changed_mind",
+        "replacement_variant_id": "variant-blue"
+      },
+      "expected": {
+        "ambiguous": false,
+        "delivery_issue_type": null,
+        "operation_type": "exchange",
+        "reason": "changed_mind",
+        "replacement_variant_id": "variant-blue"
+      },
+      "id": "operation-exchange-en",
+      "language": "en",
+      "passed": true,
+      "suite": "operation_extraction",
+      "tags": [
+        "operation",
+        "exchange"
+      ]
+    },
+    {
+      "actual": {
+        "ambiguous": false,
+        "delivery_issue_type": null,
+        "operation_type": "exchange",
+        "reason": "changed_mind",
+        "replacement_variant_id": "variant-unavailable"
+      },
+      "expected": {
+        "ambiguous": false,
+        "delivery_issue_type": null,
+        "operation_type": "exchange",
+        "reason": "changed_mind",
+        "replacement_variant_id": "variant-unavailable"
+      },
+      "id": "operation-exchange-unavailable-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "operation_extraction",
+      "tags": [
+        "operation",
+        "exchange",
+        "manual-review"
+      ]
+    },
+    {
+      "actual": {
+        "ambiguous": false,
+        "delivery_issue_type": "tracking_stalled",
+        "operation_type": null,
+        "reason": null,
+        "replacement_variant_id": null
+      },
+      "expected": {
+        "ambiguous": false,
+        "delivery_issue_type": "tracking_stalled",
+        "operation_type": null,
+        "reason": null,
+        "replacement_variant_id": null
+      },
+      "id": "operation-delivery-en",
+      "language": "en",
+      "passed": true,
+      "suite": "operation_extraction",
+      "tags": [
+        "operation",
+        "delivery"
+      ]
+    },
+    {
+      "actual": {
+        "ambiguous": true,
+        "delivery_issue_type": null,
+        "operation_type": null,
+        "reason": null,
+        "replacement_variant_id": null
+      },
+      "expected": {
+        "ambiguous": true,
+        "delivery_issue_type": null,
+        "operation_type": null,
+        "reason": null,
+        "replacement_variant_id": null
+      },
+      "id": "operation-ambiguous-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "operation_extraction",
+      "tags": [
+        "operation",
+        "ambiguous",
+        "safety"
+      ]
+    },
+    {
+      "actual": {
+        "route": "critical_risk"
+      },
+      "expected": {
+        "route": "critical_risk"
+      },
+      "id": "workflow-hard-critical-en",
+      "language": "en",
+      "passed": true,
+      "suite": "workflow_safety",
+      "tags": [
+        "workflow",
+        "hard-critical",
+        "safety"
+      ]
+    },
+    {
+      "actual": {
+        "route": "critical_risk"
+      },
+      "expected": {
+        "route": "critical_risk"
+      },
+      "id": "workflow-semantic-critical-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "workflow_safety",
+      "tags": [
+        "workflow",
+        "semantic",
+        "safety"
+      ]
+    },
+    {
+      "actual": {
+        "route": "confirm_order_priority"
+      },
+      "expected": {
+        "route": "confirm_order_priority"
+      },
+      "id": "workflow-regulatory-priority-en",
+      "language": "en",
+      "passed": true,
+      "suite": "workflow_safety",
+      "tags": [
+        "workflow",
+        "noncritical-risk",
+        "safety"
+      ]
+    },
+    {
+      "actual": {
+        "route": "order_query"
+      },
+      "expected": {
+        "route": "order_query"
+      },
+      "id": "workflow-refund-en",
+      "language": "en",
+      "passed": true,
+      "suite": "workflow_safety",
+      "tags": [
+        "workflow",
+        "refund"
+      ]
+    },
+    {
+      "actual": {
+        "route": "operation_flow"
+      },
+      "expected": {
+        "route": "operation_flow"
+      },
+      "id": "workflow-operation-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "workflow_safety",
+      "tags": [
+        "workflow",
+        "operation"
+      ]
+    },
+    {
+      "actual": {
+        "route": "formal_complaint"
+      },
+      "expected": {
+        "route": "formal_complaint"
+      },
+      "id": "workflow-complaint-zh",
+      "language": "zh",
+      "passed": true,
+      "suite": "workflow_safety",
+      "tags": [
+        "workflow",
+        "complaint"
+      ]
+    },
+    {
+      "actual": {
+        "route": "formal_complaint"
+      },
+      "expected": {
+        "route": "formal_complaint"
+      },
+      "id": "workflow-handoff-en",
+      "language": "en",
+      "passed": true,
+      "suite": "workflow_safety",
+      "tags": [
+        "workflow",
+        "handoff"
+      ]
+    },
+    {
+      "actual": {
+        "route": "support_case_status"
+      },
+      "expected": {
+        "route": "support_case_status"
+      },
+      "id": "workflow-case-status-en",
+      "language": "en",
+      "passed": true,
+      "suite": "workflow_safety",
+      "tags": [
+        "workflow",
+        "case"
+      ]
+    }
+  ],
+  "runner_version": "1.0.0",
+  "schema_version": 1,
+  "suites": [
+    {
+      "pass_rate": 1.0,
+      "passed": 5,
+      "suite": "formal_complaint",
+      "total": 5
+    },
+    {
+      "pass_rate": 1.0,
+      "passed": 7,
+      "suite": "operation_extraction",
+      "total": 7
+    },
+    {
+      "pass_rate": 1.0,
+      "passed": 4,
+      "suite": "order_detection",
+      "total": 4
+    },
+    {
+      "pass_rate": 1.0,
+      "passed": 18,
+      "suite": "risk_rules",
+      "total": 18
+    },
+    {
+      "pass_rate": 1.0,
+      "passed": 9,
+      "suite": "routing",
+      "total": 9
+    },
+    {
+      "pass_rate": 1.0,
+      "passed": 6,
+      "suite": "semantic_risk",
+      "total": 6
+    },
+    {
+      "pass_rate": 1.0,
+      "passed": 8,
+      "suite": "workflow_safety",
+      "total": 8
+    }
+  ],
+  "total": 57
+}

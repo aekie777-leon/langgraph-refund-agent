@@ -43,6 +43,12 @@ class DemoOrderProvider:
             ),
             "ORD-10010": self._shipped("ORD-10010", "89.99", current, 80),
             "ORD-10011": self._delivered("ORD-10011", "59.99", current, 1),
+            "ORD-10012": OrderSnapshot(
+                order_id="ORD-10012", version=1, amount=Decimal("39.99"), currency="USD",
+                order_status="confirmed", payment_status="paid", fulfillment_status="unfulfilled",
+                created_at=current - timedelta(days=1), return_eligible=True, exchange_eligible=True,
+                customer_id=_DEMO_CUSTOMER, tenant_id=_DEMO_TENANT,
+            ),
             "ORD-20001": self._delivered(
                 "ORD-20001", "69.99", current, 2, customer=_CUSTOMER_B
             ),

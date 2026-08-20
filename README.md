@@ -1,8 +1,88 @@
 # LangGraph Refund Agent
 
-A small, risk-aware customer-service assistant built with LangGraph. It classifies order operations, refund requests, order inquiries, delivery issues, and complaints; performs deterministic and semantic risk checks; keeps business eligibility decisions deterministic; asks for confirmation before state-changing operations; and stores order operations, refund requests, support cases, and immutable events in PostgreSQL.
+[![CI](https://github.com/aekie777-leon/langgraph-refund-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/aekie777-leon/langgraph-refund-agent/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2F855A.svg)](LICENSE)
 
-Version: `0.9.0`
+A production-oriented, multi-tenant customer-service agent built with
+LangGraph, FastAPI, PostgreSQL, React, and transactional Outbox/Inbox workers.
+It keeps policy decisions deterministic, requires human confirmation before
+state-changing actions, and makes identity, tenant, retry, and audit boundaries
+explicit.
+
+Version: `1.0.0`
+
+> **Portfolio scope:** this repository demonstrates production engineering
+> practices with synthetic local data. It is not deployed to production and
+> makes no production-readiness claim for the included model, safety policy, or
+> local infrastructure.
+
+![OpsPilot local showcase console](docs/assets/showcase-console.png)
+
+## Review the project in five minutes
+
+1. Start the no-cloud-key [local showcase](docs/v1.0_showcase.md) and run an
+   actual Graph interrupt/resume flow.
+2. Inspect the [versioned AI evaluation](docs/v1.0_evaluation.md): 57 English
+   and Chinese scenarios with deterministic safety gates and committed JSON
+   evidence.
+3. Trigger the [fault demo](docs/v1.0_observability.md): Provider HTTP 500,
+   persisted retry, successful delivery, signed webhook, and Inbox completion.
+4. Use the [v1.0 release map](docs/v1.0_release.md) to trace architecture,
+   security decisions, test evidence, and intentionally deferred production
+   work.
+
+## Engineering evidence
+
+| Area | Evidence in this repository |
+|---|---|
+| Agent design | LangGraph state machine, structured model outputs, deterministic policy nodes, human-in-the-loop interrupts |
+| Backend | Async FastAPI boundaries, strict Pydantic contracts, PostgreSQL repositories, idempotency and optimistic concurrency |
+| Distributed reliability | Transactional Outbox/Inbox, leases and fencing, bounded retries, signed callbacks, replay-safe processing and redrive |
+| Identity and security | OIDC/JWT verification, JWKS rotation, server-derived RBAC, tenant isolation, read-only SCIM assignment checks |
+| AI safety and evaluation | Bilingual versioned dataset, real routing-function evaluation, negative boundaries, reproducible CI artifact |
+| Product demonstration | React/TypeScript console, Docker Compose stack, persona-scoped case and Provider operations views |
+| Quality | Python 3.11/3.12 CI with real PostgreSQL, Ruff, mypy, pytest, ESLint, Vitest, Playwright, package and container checks |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UI[React showcase console] -->|Bearer token| API[LangGraph Server + FastAPI]
+    API --> AUTH[OIDC/JWKS runtime\nRBAC + tenant scope]
+    API --> GRAPH[LangGraph workflow\nstructured AI + deterministic policy]
+    GRAPH -->|interrupt / resume| UI
+    GRAPH --> DB[(PostgreSQL\ndomain + audit + queues)]
+    DB --> OUT[Outbox worker]
+    OUT -->|signed command| PROVIDER[Provider adapter\nlocal simulator in showcase]
+    PROVIDER -->|HMAC callback| API
+    API --> DB
+    DB --> IN[Inbox worker]
+    IN --> DB
+    API --> OPS[Case + Provider Ops APIs]
+```
+
+The local portfolio profile runs every component above with deterministic
+model-facing adapters, synthetic identities, and loopback-only ports. The
+production profile instead fails closed unless OIDC, SCIM, TLS PostgreSQL, and
+secure Provider transport requirements are satisfied.
+
+## What's new in v1.0.0
+
+- Adds a self-contained React/TypeScript operations console backed by the real
+  LangGraph workflow, PostgreSQL repositories, scoped internal APIs, and two
+  fenced workers
+- Provides prepared recruiter-friendly evidence paths for refunds, manual
+  review, complaints, assignment, Provider lifecycle, and risk-aware handoff
+- Adds 57 versioned bilingual AI and safety scenarios, deterministic release
+  gates, and reproducible Markdown/JSON evidence verified in CI
+- Demonstrates a real transient Provider failure through persisted
+  `retry_scheduled`, `accepted`, and `processed` attempt history without
+  exposing payloads or credentials
+- Adds frontend lint, unit-test, and production-build CI while preserving the
+  existing Python 3.11/3.12 and real PostgreSQL matrix
+- Preserves migrations `0001`–`0008`, the Graph workflow, Provider wire
+  contract, v0.9 identity boundary, and all existing domain APIs
 
 ## What's new in v0.9.0
 
@@ -264,6 +344,11 @@ credential dependency, although the API lifespan still initializes the
 existing v0.7 connection resolvers. Authenticated malformed JSON receives a
 sanitized `422`; a valid request without credentials receives the shared `401`.
 
+The v1.0 portfolio layer adds a sixth, read-only Supervisor route,
+`GET /internal/provider-operations/attempts`, for a bounded tenant-scoped
+timeline of payload-free Outbox and Inbox attempt evidence. See
+[`docs/v1.0_observability.md`](docs/v1.0_observability.md).
+
 ### Resume an order-priority interrupt
 
 When a run returns an `order_priority_confirmation` interrupt, resume the same thread rather than sending a new user message. To continue with the order, send:
@@ -489,6 +574,7 @@ The bundled data is intended only for local demonstration and tests.
 | `ORD-10009` | Processing order for manual cancellation-review testing |
 | `ORD-10010` | Shipped order with intentionally stalled tracking for delivery-investigation testing |
 | `ORD-10011` | Recently delivered order for return or exchange testing |
+| `ORD-10012` | Confirmed order whose local Showcase Provider fails once, then recovers |
 
 ## v0.5 order-operation lifecycle
 
@@ -1111,6 +1197,7 @@ Critical/High 扫描。最终运行时同时在 Agent Server 自身 constraints 
 | `ORD-10009` | 正在处理，用于取消订单人工审核测试 |
 | `ORD-10010` | 已发货且物流刻意停滞，用于物流调查测试 |
 | `ORD-10011` | 最近送达，用于退货或换货测试 |
+| `ORD-10012` | 本地 Showcase Provider 首次失败、随后恢复的已确认订单 |
 
 ## v0.5 订单操作生命周期
 

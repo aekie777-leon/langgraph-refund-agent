@@ -128,6 +128,7 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
+!.env.showcase
 .venv
 env/
 venv/
@@ -167,3 +168,9 @@ cython_debug/
 #.idea/
 .langgraph_api/
 .uv-cache/
+
+# Portfolio showcase frontend
+demo-ui/node_modules/
+demo-ui/dist/
+demo-ui/playwright-report/
+demo-ui/test-results/

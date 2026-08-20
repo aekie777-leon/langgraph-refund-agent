@@ -47,11 +47,13 @@ from agent.operations.service import OperationService
 from agent.refunds.postgres_repository import PostgresRefundRepository
 from agent.refunds.runtime import clear_refund_service, configure_refund_service
 from agent.refunds.service import RefundService
+from agent.showcase import validate_showcase_environment
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Open and close the application-scoped PostgreSQL connection pool."""
+    validate_showcase_environment()
     await initialize_identity_runtime(
         os.environ,
         studio_auth_disabled=_studio_auth_disabled(),
@@ -125,7 +127,7 @@ def _studio_auth_disabled() -> bool:
 
 app = FastAPI(
     title="OpsPilot Internal API",
-    version="0.9.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 app.include_router(support_case_router)

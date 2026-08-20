@@ -106,6 +106,15 @@
     "owner_customer_id": "customer-a",
     "tenant_id": "tenant-demo"
   },
+  "ORD-10012": {
+    "order_id": "ORD-10012",
+    "product_name": "Travel Cable Organizer",
+    "status": "confirmed",
+    "amount": 39.99,
+    "refunded": false,
+    "owner_customer_id": "customer-a",
+    "tenant_id": "tenant-demo"
+  },
   "ORD-20001": {
     "order_id": "ORD-20001",
     "product_name": "Desk Mat",

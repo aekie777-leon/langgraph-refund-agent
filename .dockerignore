@@ -46,7 +46,12 @@ Makefile
 Dockerfile
 .dockerignore
 compose.yaml
+compose.showcase.yaml
 langgraph.dev.json
+langgraph.showcase.json
+Dockerfile.showcase-api
+Dockerfile.showcase-api.dockerignore
+demo-ui/
 
 # Editors and operating-system files
 .vscode/

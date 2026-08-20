@@ -9,6 +9,8 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from agent.integrations.provider_operations_contracts import (
+    ProviderAttemptActivity,
+    ProviderAttemptActivityFeed,
     ProviderInboxAttemptView,
     ProviderInboxDetail,
     ProviderInboxQueueSummary,
@@ -113,6 +115,23 @@ RESPONSE_FIELD_WHITELISTS: tuple[
         {"status", "count", "oldest_available_at"},
     ),
     (ProviderQueueOverview, {"outbox", "inbox", "generated_at"}),
+    (
+        ProviderAttemptActivity,
+        {
+            "queue",
+            "resource_id",
+            "command_id",
+            "cycle",
+            "attempt_number",
+            "outcome",
+            "failure_kind",
+            "http_status",
+            "safe_error_code",
+            "started_at",
+            "finished_at",
+        },
+    ),
+    (ProviderAttemptActivityFeed, {"items", "generated_at"}),
     (
         ProviderOutboxAttemptView,
         {
@@ -270,6 +289,21 @@ def test_queue_overview_is_a_strict_safe_aggregate() -> None:
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         ProviderQueueOverview.model_validate(
             {**overview.model_dump(), "tenant_id": "tenant-demo"}
+        )
+
+
+def test_attempt_activity_keeps_transport_fields_out_of_inbox_rows() -> None:
+    with pytest.raises(ValidationError, match="transport failure fields"):
+        ProviderAttemptActivity(
+            queue="inbox",
+            resource_id=INBOX_ID,
+            command_id=COMMAND_ID,
+            cycle=1,
+            attempt_number=1,
+            outcome="retry_scheduled",
+            failure_kind="http_retryable",
+            http_status=500,
+            started_at=NOW,
         )
 
 

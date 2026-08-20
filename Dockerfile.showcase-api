@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1
+
+# Development-only Agent Server for the self-contained portfolio showcase.
+# The production image remains the licensed, hardened Dockerfile image.
+FROM ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc AS uv-bin
+
+FROM python:3.11-alpine@sha256:6857d2dae63e052057f2db389a7061188ac9a92a3fa8d402bde68f36df6fada1
+
+COPY --from=uv-bin /uv /uvx /bin/
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/workspace/.venv/bin:$PATH"
+
+WORKDIR /workspace
+
+COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY src ./src
+COPY langgraph.showcase.json ./
+# webapp.py performs a second, fail-closed startup check against the canonical
+# deployed filename. Keep both checks on the exact same showcase policy.
+COPY langgraph.showcase.json ./langgraph.json
+
+RUN uv sync --frozen --extra showcase --no-dev --no-editable && \
+    /usr/local/bin/python3 -m pip uninstall -y pip setuptools wheel jaraco.context && \
+    rm -rf /usr/local/lib/python*/site-packages/pip* \
+           /usr/local/lib/python*/site-packages/setuptools* \
+           /usr/local/lib/python*/site-packages/wheel* \
+           /usr/local/lib/python*/site-packages/jaraco/context* && \
+    rm -f /usr/local/bin/pip* /bin/uv /bin/uvx
+
+EXPOSE 8000

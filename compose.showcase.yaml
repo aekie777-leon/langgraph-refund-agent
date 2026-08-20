@@ -1,0 +1,89 @@
+# Local-only portfolio environment. It uses synthetic identities, data and
+# Provider credentials and must never be used as a production deployment file.
+services:
+  case-migrations:
+    image: langgraph-refund-agent:1.0.0-showcase
+
+  langgraph-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.showcase-api
+    image: langgraph-refund-agent-showcase-api:1.0.0
+    entrypoint: []
+    command:
+      [
+        "langgraph",
+        "dev",
+        "--no-browser",
+        "--no-reload",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--config",
+        "langgraph.showcase.json",
+      ]
+    environment:
+      APP_ENV: development
+      SHOWCASE_MODE: "true"
+      IDENTITY_PROVIDER: demo
+      IDENTITY_DIRECTORY: none
+      LANGCHAIN_TRACING_V2: "false"
+      LANGSMITH_API_KEY: ""
+
+  outbox-worker:
+    image: langgraph-refund-agent:1.0.0-showcase
+    healthcheck:
+      disable: true
+    depends_on:
+      provider-simulator:
+        condition: service_started
+
+  inbox-worker:
+    image: langgraph-refund-agent:1.0.0-showcase
+    healthcheck:
+      disable: true
+
+  provider-simulator:
+    image: langgraph-refund-agent:1.0.0-showcase
+    entrypoint:
+      [
+        "uvicorn",
+        "agent.showcase.provider_app:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8090",
+        "--no-access-log",
+      ]
+    env_file:
+      - .env.showcase
+    environment:
+      APP_ENV: development
+      SHOWCASE_MODE: "true"
+      IDENTITY_PROVIDER: demo
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      case-migrations:
+        condition: service_completed_successfully
+
+  showcase-ui:
+    build:
+      context: demo-ui
+      dockerfile: Dockerfile
+    image: langgraph-refund-agent-showcase-ui:1.0.0
+    ports:
+      - "127.0.0.1:3000:8080"
+    depends_on:
+      langgraph-api:
+        condition: service_started

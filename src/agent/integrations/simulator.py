@@ -10,21 +10,36 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 
 from agent.integrations.models import ProviderCommandEnvelope, ProviderCommandResult
 
+ProviderOutcomeSelector = Callable[[ProviderCommandEnvelope, int], str | None]
+
 
 def create_provider_simulator(
-    *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    accepted_callback: Callable[
+        [ProviderCommandEnvelope, ProviderCommandResult], Awaitable[None]
+    ]
+    | None = None,
+    outcome_selector: ProviderOutcomeSelector | None = None,
 ) -> FastAPI:
     """Create a deterministic local provider endpoint with idempotent results."""
     app = FastAPI(title="Demo Provider Simulator", docs_url=None, redoc_url=None)
     results: dict[str, ProviderCommandResult] = {}
+    attempts: dict[str, int] = {}
+
+    @app.get("/healthz")
+    async def health() -> dict[str, str]:
+        """Expose a payload-free liveness signal for local orchestration."""
+        return {"status": "ok"}
 
     @app.post("/v1/commands")
     async def submit(
         request: Request,
+        background_tasks: BackgroundTasks,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         command_header: str | None = Header(default=None, alias="X-Provider-Command-ID"),
         outcome: str = Header(default="accepted", alias="X-Provider-Simulator-Outcome"),
@@ -41,6 +56,13 @@ def create_provider_simulator(
                 content=results[command.idempotency_key].model_dump_json(),
                 media_type="application/json",
             )
+        attempts[command.idempotency_key] = attempts.get(command.idempotency_key, 0) + 1
+        if outcome_selector is not None:
+            selected_outcome = outcome_selector(
+                command, attempts[command.idempotency_key]
+            )
+            if selected_outcome is not None:
+                outcome = selected_outcome
         if outcome == "http_409":
             raise HTTPException(status_code=409, detail="demo conflict")
         if outcome == "http_422":
@@ -61,6 +83,8 @@ def create_provider_simulator(
             received_at=datetime.now(UTC),
         )
         results[command.idempotency_key] = result
+        if accepted_callback is not None and result.status == "accepted":
+            background_tasks.add_task(accepted_callback, command, result)
         return Response(content=result.model_dump_json(), media_type="application/json")
 
     return app

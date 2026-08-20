@@ -188,11 +188,27 @@ def test_release_versions_and_profiles_are_consistent() -> None:
     compose = Path("compose.yaml").read_text(encoding="utf-8")
     dockerignore = Path(".dockerignore").read_text(encoding="utf-8")
 
-    assert 'version = "0.9.0"' in pyproject
-    assert 'org.opencontainers.image.version="0.9.0"' in dockerfile
-    assert compose.count("langgraph-refund-agent:0.9.0") == 4
+    assert 'version = "1.0.0"' in pyproject
+    assert 'org.opencontainers.image.version="1.0.0"' in dockerfile
+    assert compose.count("langgraph-refund-agent:1.0.0") == 4
     assert "Local development only" in compose
     assert "langgraph.dev.json" in dockerignore
+
+
+def test_v1_portfolio_release_contract_is_discoverable_and_ci_checked() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    release = Path("docs/v1.0_release.md").read_text(encoding="utf-8")
+
+    assert "Version: `1.0.0`" in readme
+    assert "docs/assets/showcase-console.png" in readme
+    assert "docs/v1.0_release.md" in readme
+    assert "showcase-ui:" in workflow
+    assert "npm ci" in workflow
+    assert "npm run lint" in workflow
+    assert "npm test" in workflow
+    assert "npm run build" in workflow
+    assert "portfolio demonstration, not a production deployment" in release
 
 
 def test_model_configuration_is_checked_lazily(

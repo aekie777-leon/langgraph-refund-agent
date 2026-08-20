@@ -20,7 +20,7 @@ from agent.integrations.persistence_models import (
     ClaimedOutboxMessage,
     OutboxDeliveryAttempt,
 )
-from agent.integrations.retry import ProviderConnectionError
+from agent.integrations.retry import HTTPStatusError, ProviderConnectionError
 
 pytestmark = pytest.mark.anyio
 
@@ -43,10 +43,13 @@ class Repository:
     def __init__(self, claimed: list[ClaimedOutboxMessage]) -> None:
         self.claimed = claimed
         self.retries = 0
+        self.retry_arguments: dict[str, object] = {}
     async def claim_due_outbox(self, **_kwargs): return self.claimed
     async def recover_expired_outbox_leases(self, **_kwargs): return 0
     async def renew_outbox_lease(self, **_kwargs): return True
-    async def schedule_outbox_retry(self, **_kwargs): self.retries += 1
+    async def schedule_outbox_retry(self, **kwargs):
+        self.retries += 1
+        self.retry_arguments = kwargs
 
 
 class Lookup:
@@ -86,3 +89,20 @@ async def test_retryable_failure_schedules_retry_without_terminal_finalization()
     assert result.retried == 1
     assert repository.retries == 1
     assert finalizer.actions == []
+
+
+async def test_http_retry_persists_only_the_structured_status() -> None:
+    repository = Repository([_claimed()])
+    result = await OutboxDispatchWorker(
+        repository=repository,
+        connection_lookup=Lookup(),
+        transport=Transport(error=HTTPStatusError(500, "untrusted provider body")),
+        finalizer=Finalizer(),
+        worker_id="worker-1",
+        random_source=lambda: 0,
+    ).run_once()
+
+    assert result.retried == 1
+    assert repository.retry_arguments["http_status"] == 500
+    assert repository.retry_arguments["error_code"] == "provider_http_500"
+    assert "untrusted provider body" not in str(repository.retry_arguments)

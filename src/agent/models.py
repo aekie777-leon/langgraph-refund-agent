@@ -13,12 +13,24 @@ from agent.schemas import (
     Route,
     SemanticRiskDetection,
 )
+from agent.showcase import showcase_enabled, validate_showcase_environment
+from agent.showcase.scenario_models import (
+    ShowcaseComplaintClassifier,
+    ShowcaseComplaintModel,
+    ShowcaseOperationExtractor,
+    ShowcaseOrderDetector,
+    ShowcaseRiskClassifier,
+    ShowcaseRouter,
+)
 
 load_dotenv()
 
 
-def get_llm() -> ChatOpenAI:
+def get_llm() -> Any:
     """Create the configured OpenAI-compatible chat model."""
+    validate_showcase_environment()
+    if showcase_enabled():
+        return ShowcaseComplaintModel()
     api_key = os.getenv("OPENAI_API_KEY")
     model = os.getenv("OPENAI_MODEL")
     missing = [
@@ -45,24 +57,39 @@ def get_llm() -> ChatOpenAI:
 
 def get_order_detector() -> Any:
     """Create the structured-output model used to detect order numbers."""
+    validate_showcase_environment()
+    if showcase_enabled():
+        return ShowcaseOrderDetector()
     return get_llm().with_structured_output(OrderDetection)
 
 
 def get_router() -> Any:
     """Create the structured-output model used for intent routing."""
+    validate_showcase_environment()
+    if showcase_enabled():
+        return ShowcaseRouter()
     return get_llm().with_structured_output(Route)
 
 
 def get_risk_classifier() -> Any:
     """Create the structured-output semantic risk classifier."""
+    validate_showcase_environment()
+    if showcase_enabled():
+        return ShowcaseRiskClassifier()
     return get_llm().with_structured_output(SemanticRiskDetection)
 
 
 def get_formal_complaint_classifier() -> Any:
     """Create the structured-output formal-complaint classifier."""
+    validate_showcase_environment()
+    if showcase_enabled():
+        return ShowcaseComplaintClassifier()
     return get_llm().with_structured_output(FormalComplaintDetection)
 
 
 def get_operation_request_extractor() -> Any:
     """Create the structured-output model for narrow operation extraction."""
+    validate_showcase_environment()
+    if showcase_enabled():
+        return ShowcaseOperationExtractor()
     return get_llm().with_structured_output(OperationRequestExtraction)

@@ -22,6 +22,7 @@ def anyio_backend() -> str:
 def _repository() -> AsyncMock:
     repository = AsyncMock()
     repository.get_queue_overview.return_value = object()
+    repository.get_attempt_activity.return_value = object()
     repository.get_outbox_detail.return_value = object()
     repository.get_inbox_detail.return_value = object()
     repository.redrive_outbox.return_value = object()
@@ -42,6 +43,10 @@ async def test_service_delegates_reads_and_redrives_for_canonical_supervisor() -
     assert (
         await service.get_queue_overview(scope)
         is repository.get_queue_overview.return_value
+    )
+    assert (
+        await service.get_attempt_activity(scope, limit=11)
+        is repository.get_attempt_activity.return_value
     )
     assert (
         await service.get_outbox_detail(scope, command_id, history_limit=7)
@@ -66,6 +71,7 @@ async def test_service_delegates_reads_and_redrives_for_canonical_supervisor() -
     repository.get_inbox_detail.assert_awaited_once_with(
         scope, inbox_id, history_limit=9
     )
+    repository.get_attempt_activity.assert_awaited_once_with(scope, limit=11)
 
 
 @pytest.mark.parametrize(
@@ -110,4 +116,5 @@ async def test_service_fails_closed_on_role_or_permission_mismatch(
             )
 
     repository.get_queue_overview.assert_not_awaited()
+    repository.get_attempt_activity.assert_not_awaited()
     repository.redrive_inbox.assert_not_awaited()

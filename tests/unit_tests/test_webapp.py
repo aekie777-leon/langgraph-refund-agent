@@ -130,8 +130,8 @@ def test_production_app_registers_the_provider_webhook_route() -> None:
     )
 
 
-def test_production_app_reports_v090() -> None:
-    assert webapp.app.version == "0.9.0"
+def test_production_app_reports_v100() -> None:
+    assert webapp.app.version == "1.0.0"
 
 
 def test_production_app_preserves_case_routes_and_adds_exact_provider_ops_routes() -> (

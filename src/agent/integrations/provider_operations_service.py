@@ -6,6 +6,7 @@ from agent.auth.models import AccessScope, ProviderOperationsPermission
 from agent.auth.rbac import has_provider_operations_permission
 from agent.auth.visibility import ForbiddenError
 from agent.integrations.provider_operations_contracts import (
+    ProviderAttemptActivityFeed,
     ProviderInboxDetail,
     ProviderOutboxDetail,
     ProviderQueueOverview,
@@ -34,6 +35,13 @@ class ProviderOperationsService:
         """Return safe tenant queue aggregates to an authorized Supervisor."""
         _authorize(scope, "provider_ops:read")
         return await self._repository.get_queue_overview(scope)
+
+    async def get_attempt_activity(
+        self, scope: AccessScope, *, limit: int = 50
+    ) -> ProviderAttemptActivityFeed:
+        """Return recent tenant attempt evidence to an authorized Supervisor."""
+        _authorize(scope, "provider_ops:read")
+        return await self._repository.get_attempt_activity(scope, limit=limit)
 
     async def get_outbox_detail(
         self, scope: AccessScope, command_id: UUID, *, history_limit: int = 50

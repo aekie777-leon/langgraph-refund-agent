@@ -492,6 +492,7 @@ class PostgresIntegrationRepository:
         error_message: str | None,
         retry_after_seconds: float | None,
         next_available_at: datetime,
+        http_status: int | None = None,
     ) -> None:
         """Finalize the attempt and schedule the next delivery in one transaction."""
         try:
@@ -535,6 +536,7 @@ class PostgresIntegrationRepository:
                             finished_at=now,
                             outcome="retry_scheduled",
                             failure_kind=failure_kind,
+                            http_status=http_status,
                             safe_error_code=error_code,
                             safe_error_message=error_message,
                             retry_after_seconds=retry_after_seconds,

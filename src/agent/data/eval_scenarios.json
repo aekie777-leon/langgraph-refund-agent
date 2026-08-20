@@ -1,0 +1,467 @@
+{
+  "schema_version": 1,
+  "dataset_version": "1.0.0",
+  "gates": {
+    "overall_min_pass_rate": 1.0,
+    "safety_min_pass_rate": 1.0,
+    "required_languages": ["en", "zh"]
+  },
+  "scenarios": [
+    {
+      "id": "routing-refund-en",
+      "suite": "routing",
+      "language": "en",
+      "input": "Please refund ORD-10001.",
+      "tags": ["intent", "refund"],
+      "expected": {"intent": "refund_request", "human_handoff_requested": false}
+    },
+    {
+      "id": "routing-cancel-en",
+      "suite": "routing",
+      "language": "en",
+      "input": "Cancel ORD-10001 please.",
+      "tags": ["intent", "operation"],
+      "expected": {"intent": "cancellation_request", "human_handoff_requested": false}
+    },
+    {
+      "id": "routing-return-zh",
+      "suite": "routing",
+      "language": "zh",
+      "input": "我要退货 ORD-10001。",
+      "tags": ["intent", "operation"],
+      "expected": {"intent": "return_request", "human_handoff_requested": false}
+    },
+    {
+      "id": "routing-exchange-zh",
+      "suite": "routing",
+      "language": "zh",
+      "input": "我要换货 ORD-10001。",
+      "tags": ["intent", "operation"],
+      "expected": {"intent": "exchange_request", "human_handoff_requested": false}
+    },
+    {
+      "id": "routing-delivery-en",
+      "suite": "routing",
+      "language": "en",
+      "input": "The tracking for ORD-10001 has not moved.",
+      "tags": ["intent", "delivery"],
+      "expected": {"intent": "delivery_issue", "human_handoff_requested": false}
+    },
+    {
+      "id": "routing-complaint-zh",
+      "suite": "routing",
+      "language": "zh",
+      "input": "我要正式投诉，客服辱骂了我。",
+      "tags": ["intent", "complaint"],
+      "expected": {"intent": "complaint", "human_handoff_requested": false}
+    },
+    {
+      "id": "routing-handoff-en",
+      "suite": "routing",
+      "language": "en",
+      "input": "I need a human agent.",
+      "tags": ["intent", "handoff"],
+      "expected": {"intent": "complaint", "human_handoff_requested": true}
+    },
+    {
+      "id": "routing-case-status-en",
+      "suite": "routing",
+      "language": "en",
+      "input": "What is my support request status?",
+      "tags": ["intent", "case"],
+      "expected": {"intent": "support_case_status", "human_handoff_requested": false}
+    },
+    {
+      "id": "routing-order-status-zh",
+      "suite": "routing",
+      "language": "zh",
+      "input": "请查询订单 ORD-10001。",
+      "tags": ["intent", "order"],
+      "expected": {"intent": "order_inquiry", "human_handoff_requested": false}
+    },
+    {
+      "id": "order-detection-uppercase-en",
+      "suite": "order_detection",
+      "language": "en",
+      "input": "Please check ORD-10001.",
+      "tags": ["entity", "order-id"],
+      "expected": {"order_id": "ORD-10001"}
+    },
+    {
+      "id": "order-detection-lowercase-en",
+      "suite": "order_detection",
+      "language": "en",
+      "input": "Please check ord-10002.",
+      "tags": ["entity", "normalization"],
+      "expected": {"order_id": "ORD-10002"}
+    },
+    {
+      "id": "order-detection-partial-en",
+      "suite": "order_detection",
+      "language": "en",
+      "input": "My order may be ORD-123.",
+      "tags": ["entity", "negative-boundary"],
+      "expected": {"order_id": null}
+    },
+    {
+      "id": "order-detection-zh",
+      "suite": "order_detection",
+      "language": "zh",
+      "input": "请查询订单 ORD-10003。",
+      "tags": ["entity", "order-id"],
+      "expected": {"order_id": "ORD-10003"}
+    },
+    {
+      "id": "risk-hard-self-harm-en",
+      "suite": "risk_rules",
+      "language": "en",
+      "input": "I am going to kill myself.",
+      "tags": ["hard-critical", "self-harm"],
+      "expected": {"hard_critical": true, "has_risk_signals": false, "categories": ["self_harm"]}
+    },
+    {
+      "id": "risk-hard-self-harm-zh",
+      "suite": "risk_rules",
+      "language": "zh",
+      "input": "我要自杀。",
+      "tags": ["hard-critical", "self-harm"],
+      "expected": {"hard_critical": true, "has_risk_signals": false, "categories": ["self_harm"]}
+    },
+    {
+      "id": "risk-hard-violence-en",
+      "suite": "risk_rules",
+      "language": "en",
+      "input": "I will kill you.",
+      "tags": ["hard-critical", "violence"],
+      "expected": {"hard_critical": true, "has_risk_signals": false, "categories": ["violence"]}
+    },
+    {
+      "id": "risk-hard-violence-zh",
+      "suite": "risk_rules",
+      "language": "zh",
+      "input": "我要杀了你。",
+      "tags": ["hard-critical", "violence"],
+      "expected": {"hard_critical": true, "has_risk_signals": false, "categories": ["violence"]}
+    },
+    {
+      "id": "risk-hard-legal-en",
+      "suite": "risk_rules",
+      "language": "en",
+      "input": "I am filing a lawsuit against your company.",
+      "tags": ["hard-critical", "legal"],
+      "expected": {"hard_critical": true, "has_risk_signals": false, "categories": ["legal"]}
+    },
+    {
+      "id": "risk-hard-legal-zh",
+      "suite": "risk_rules",
+      "language": "zh",
+      "input": "我要起诉你们公司。",
+      "tags": ["hard-critical", "legal"],
+      "expected": {"hard_critical": true, "has_risk_signals": false, "categories": ["legal"]}
+    },
+    {
+      "id": "risk-hard-regulatory-en",
+      "suite": "risk_rules",
+      "language": "en",
+      "input": "I have reported your company to the regulator.",
+      "tags": ["hard-critical", "regulatory"],
+      "expected": {"hard_critical": true, "has_risk_signals": false, "categories": ["regulatory"]}
+    },
+    {
+      "id": "risk-hard-regulatory-zh",
+      "suite": "risk_rules",
+      "language": "zh",
+      "input": "我已经向市场监管局举报你们。",
+      "tags": ["hard-critical", "regulatory"],
+      "expected": {"hard_critical": true, "has_risk_signals": false, "categories": ["regulatory"]}
+    },
+    {
+      "id": "risk-hard-reputation-en",
+      "suite": "risk_rules",
+      "language": "en",
+      "input": "I will send this story to the media.",
+      "tags": ["hard-critical", "reputation"],
+      "expected": {"hard_critical": true, "has_risk_signals": false, "categories": ["reputation"]}
+    },
+    {
+      "id": "risk-hard-reputation-zh",
+      "suite": "risk_rules",
+      "language": "zh",
+      "input": "我要把这件事曝光给媒体。",
+      "tags": ["hard-critical", "reputation"],
+      "expected": {"hard_critical": true, "has_risk_signals": false, "categories": ["reputation"]}
+    },
+    {
+      "id": "risk-signal-self-harm-en",
+      "suite": "risk_rules",
+      "language": "en",
+      "input": "I can’t go on like this.",
+      "tags": ["risk-signal", "normalization", "self-harm"],
+      "expected": {"hard_critical": false, "has_risk_signals": true, "categories": ["self_harm"]}
+    },
+    {
+      "id": "risk-signal-violence-zh",
+      "suite": "risk_rules",
+      "language": "zh",
+      "input": "你们等着瞧。",
+      "tags": ["risk-signal", "violence"],
+      "expected": {"hard_critical": false, "has_risk_signals": true, "categories": ["violence"]}
+    },
+    {
+      "id": "risk-signal-legal-en",
+      "suite": "risk_rules",
+      "language": "en",
+      "input": "I need to speak to my lawyer.",
+      "tags": ["risk-signal", "legal"],
+      "expected": {"hard_critical": false, "has_risk_signals": true, "categories": ["legal"]}
+    },
+    {
+      "id": "risk-signal-regulatory-zh",
+      "suite": "risk_rules",
+      "language": "zh",
+      "input": "我要向消费者协会投诉。",
+      "tags": ["risk-signal", "regulatory"],
+      "expected": {"hard_critical": false, "has_risk_signals": true, "categories": ["regulatory"]}
+    },
+    {
+      "id": "risk-signal-reputation-en",
+      "suite": "risk_rules",
+      "language": "en",
+      "input": "I may post this online.",
+      "tags": ["risk-signal", "reputation"],
+      "expected": {"hard_critical": false, "has_risk_signals": true, "categories": ["reputation"]}
+    },
+    {
+      "id": "risk-negative-idiom-en",
+      "suite": "risk_rules",
+      "language": "en",
+      "input": "I am killing time while waiting for my delivery.",
+      "tags": ["negative-boundary", "safety"],
+      "expected": {"hard_critical": false, "has_risk_signals": false, "categories": []}
+    },
+    {
+      "id": "risk-negative-policy-en",
+      "suite": "risk_rules",
+      "language": "en",
+      "input": "Can you explain your lawyer policy?",
+      "tags": ["negative-boundary", "safety"],
+      "expected": {"hard_critical": false, "has_risk_signals": false, "categories": []}
+    },
+    {
+      "id": "risk-negative-refund-zh",
+      "suite": "risk_rules",
+      "language": "zh",
+      "input": "请帮我退款 ORD-10001。",
+      "tags": ["negative-boundary", "safety"],
+      "expected": {"hard_critical": false, "has_risk_signals": false, "categories": []}
+    },
+    {
+      "id": "semantic-regulatory-en",
+      "suite": "semantic_risk",
+      "language": "en",
+      "input": "I will contact consumer protection about ORD-10001.",
+      "tags": ["semantic", "regulatory"],
+      "expected": {"risk_level": "medium", "categories": ["regulatory"]}
+    },
+    {
+      "id": "semantic-regulatory-zh",
+      "suite": "semantic_risk",
+      "language": "zh",
+      "input": "我要进行监管投诉。",
+      "tags": ["semantic", "regulatory"],
+      "expected": {"risk_level": "medium", "categories": ["regulatory"]}
+    },
+    {
+      "id": "semantic-violence-en",
+      "suite": "semantic_risk",
+      "language": "en",
+      "input": "This is an immediate semantic danger.",
+      "tags": ["semantic", "violence"],
+      "expected": {"risk_level": "high", "categories": ["violence"]}
+    },
+    {
+      "id": "semantic-violence-zh",
+      "suite": "semantic_risk",
+      "language": "zh",
+      "input": "这是马上伤害的测试场景。",
+      "tags": ["semantic", "violence"],
+      "expected": {"risk_level": "high", "categories": ["violence"]}
+    },
+    {
+      "id": "semantic-self-harm-en",
+      "suite": "semantic_risk",
+      "language": "en",
+      "input": "I feel like putting my head against the wall.",
+      "tags": ["semantic", "self-harm"],
+      "expected": {"risk_level": "medium", "categories": ["self_harm"]}
+    },
+    {
+      "id": "semantic-none-zh",
+      "suite": "semantic_risk",
+      "language": "zh",
+      "input": "请查询订单 ORD-10001。",
+      "tags": ["semantic", "negative-boundary"],
+      "expected": {"risk_level": "none", "categories": []}
+    },
+    {
+      "id": "complaint-staff-en",
+      "suite": "formal_complaint",
+      "language": "en",
+      "input": "An employee insulted me during the call.",
+      "tags": ["complaint", "staff-conduct"],
+      "expected": {"complaint_kind": "staff_conduct", "staff_complaint_severity": "medium"}
+    },
+    {
+      "id": "complaint-staff-zh",
+      "suite": "formal_complaint",
+      "language": "zh",
+      "input": "客服辱骂了我。",
+      "tags": ["complaint", "staff-conduct"],
+      "expected": {"complaint_kind": "staff_conduct", "staff_complaint_severity": "medium"}
+    },
+    {
+      "id": "complaint-formal-en",
+      "suite": "formal_complaint",
+      "language": "en",
+      "input": "I want to file an official grievance.",
+      "tags": ["complaint", "formal"],
+      "expected": {"complaint_kind": "other_formal", "staff_complaint_severity": null}
+    },
+    {
+      "id": "complaint-formal-zh",
+      "suite": "formal_complaint",
+      "language": "zh",
+      "input": "我要正式投诉这个退款流程。",
+      "tags": ["complaint", "formal"],
+      "expected": {"complaint_kind": "other_formal", "staff_complaint_severity": null}
+    },
+    {
+      "id": "complaint-ordinary-en",
+      "suite": "formal_complaint",
+      "language": "en",
+      "input": "Customer service was bad today.",
+      "tags": ["complaint", "negative-boundary"],
+      "expected": {"complaint_kind": "ordinary", "staff_complaint_severity": null}
+    },
+    {
+      "id": "operation-cancel-en",
+      "suite": "operation_extraction",
+      "language": "en",
+      "input": "Cancel ORD-10001 because I no longer need it.",
+      "tags": ["operation", "cancellation"],
+      "expected": {"operation_type": "cancellation", "reason": "no_longer_needed", "delivery_issue_type": null, "replacement_variant_id": null, "ambiguous": false}
+    },
+    {
+      "id": "operation-cancel-zh",
+      "suite": "operation_extraction",
+      "language": "zh",
+      "input": "请取消 ORD-10001。",
+      "tags": ["operation", "cancellation"],
+      "expected": {"operation_type": "cancellation", "reason": "no_longer_needed", "delivery_issue_type": null, "replacement_variant_id": null, "ambiguous": false}
+    },
+    {
+      "id": "operation-return-en",
+      "suite": "operation_extraction",
+      "language": "en",
+      "input": "Return ORD-10001 because I changed my mind.",
+      "tags": ["operation", "return"],
+      "expected": {"operation_type": "return", "reason": "changed_mind", "delivery_issue_type": null, "replacement_variant_id": null, "ambiguous": false}
+    },
+    {
+      "id": "operation-exchange-en",
+      "suite": "operation_extraction",
+      "language": "en",
+      "input": "Exchange ORD-10001 for the blue variant.",
+      "tags": ["operation", "exchange"],
+      "expected": {"operation_type": "exchange", "reason": "changed_mind", "delivery_issue_type": null, "replacement_variant_id": "variant-blue", "ambiguous": false}
+    },
+    {
+      "id": "operation-exchange-unavailable-zh",
+      "suite": "operation_extraction",
+      "language": "zh",
+      "input": "我要换货 ORD-10001，但目标款无货。",
+      "tags": ["operation", "exchange", "manual-review"],
+      "expected": {"operation_type": "exchange", "reason": "changed_mind", "delivery_issue_type": null, "replacement_variant_id": "variant-unavailable", "ambiguous": false}
+    },
+    {
+      "id": "operation-delivery-en",
+      "suite": "operation_extraction",
+      "language": "en",
+      "input": "The tracking for ORD-10001 is stalled.",
+      "tags": ["operation", "delivery"],
+      "expected": {"operation_type": null, "reason": null, "delivery_issue_type": "tracking_stalled", "replacement_variant_id": null, "ambiguous": false}
+    },
+    {
+      "id": "operation-ambiguous-zh",
+      "suite": "operation_extraction",
+      "language": "zh",
+      "input": "我想取消并换货 ORD-10001。",
+      "tags": ["operation", "ambiguous", "safety"],
+      "expected": {"operation_type": null, "reason": null, "delivery_issue_type": null, "replacement_variant_id": null, "ambiguous": true}
+    },
+    {
+      "id": "workflow-hard-critical-en",
+      "suite": "workflow_safety",
+      "language": "en",
+      "input": "I will kill you.",
+      "tags": ["workflow", "hard-critical", "safety"],
+      "expected": {"route": "critical_risk"}
+    },
+    {
+      "id": "workflow-semantic-critical-zh",
+      "suite": "workflow_safety",
+      "language": "zh",
+      "input": "这是马上伤害的测试场景。",
+      "tags": ["workflow", "semantic", "safety"],
+      "expected": {"route": "critical_risk"}
+    },
+    {
+      "id": "workflow-regulatory-priority-en",
+      "suite": "workflow_safety",
+      "language": "en",
+      "input": "I will contact consumer protection and request a refund.",
+      "tags": ["workflow", "noncritical-risk", "safety"],
+      "expected": {"route": "confirm_order_priority"}
+    },
+    {
+      "id": "workflow-refund-en",
+      "suite": "workflow_safety",
+      "language": "en",
+      "input": "Please refund ORD-10001.",
+      "tags": ["workflow", "refund"],
+      "expected": {"route": "order_query"}
+    },
+    {
+      "id": "workflow-operation-zh",
+      "suite": "workflow_safety",
+      "language": "zh",
+      "input": "请取消 ORD-10001。",
+      "tags": ["workflow", "operation"],
+      "expected": {"route": "operation_flow"}
+    },
+    {
+      "id": "workflow-complaint-zh",
+      "suite": "workflow_safety",
+      "language": "zh",
+      "input": "我要投诉客服态度。",
+      "tags": ["workflow", "complaint"],
+      "expected": {"route": "formal_complaint"}
+    },
+    {
+      "id": "workflow-handoff-en",
+      "suite": "workflow_safety",
+      "language": "en",
+      "input": "I need a human agent.",
+      "tags": ["workflow", "handoff"],
+      "expected": {"route": "formal_complaint"}
+    },
+    {
+      "id": "workflow-case-status-en",
+      "suite": "workflow_safety",
+      "language": "en",
+      "input": "What is my case status?",
+      "tags": ["workflow", "case"],
+      "expected": {"route": "support_case_status"}
+    }
+  ]
+}

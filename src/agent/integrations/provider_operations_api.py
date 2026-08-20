@@ -9,6 +9,7 @@ from agent.auth.dependencies import require_access_scope
 from agent.auth.models import AccessScope
 from agent.cases.api_models import ApiErrorResponse
 from agent.integrations.provider_operations_contracts import (
+    ProviderAttemptActivityFeed,
     ProviderInboxDetail,
     ProviderOutboxDetail,
     ProviderQueueOverview,
@@ -34,6 +35,7 @@ AccessScopeDependency = Annotated[
     Depends(require_access_scope),
 ]
 HistoryLimit = Annotated[int, Query(ge=1, le=100)]
+ActivityLimit = Annotated[int, Query(ge=1, le=100)]
 
 _UNAUTHORIZED_RESPONSE: dict[int | str, dict[str, Any]] = {
     401: {"description": "Authentication is required."},
@@ -65,6 +67,20 @@ async def get_provider_queue_overview(
 ) -> ProviderQueueOverview:
     """Return safe tenant-scoped Provider queue aggregates."""
     return await service.get_queue_overview(scope)
+
+
+@router.get(
+    "/attempts",
+    response_model=ProviderAttemptActivityFeed,
+    responses=_FORBIDDEN_AND_STORAGE_RESPONSES,
+)
+async def get_provider_attempt_activity(
+    scope: AccessScopeDependency,
+    service: ProviderOperationsServiceDependency,
+    limit: ActivityLimit = 50,
+) -> ProviderAttemptActivityFeed:
+    """Return a recent payload-free Provider attempt timeline."""
+    return await service.get_attempt_activity(scope, limit=limit)
 
 
 @router.get(

@@ -1,7 +1,7 @@
 """Strict field-whitelisted contracts for the Provider operations control plane."""
 
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -77,6 +77,41 @@ class ProviderQueueOverview(_StrictProviderOperationsModel):
 
     outbox: tuple[ProviderOutboxQueueSummary, ...] = Field(default_factory=tuple)
     inbox: tuple[ProviderInboxQueueSummary, ...] = Field(default_factory=tuple)
+    generated_at: AwareDatetime
+
+
+ProviderAttemptOutcome = DeliveryAttemptOutcome | InboxAttemptOutcome
+
+
+class ProviderAttemptActivity(_StrictProviderOperationsModel):
+    """Expose one payload-free attempt in the tenant operational timeline."""
+
+    queue: Literal["outbox", "inbox"]
+    resource_id: UUID
+    command_id: UUID
+    cycle: int = Field(ge=1)
+    attempt_number: int = Field(ge=1)
+    outcome: ProviderAttemptOutcome | None = None
+    failure_kind: ProviderFailureKind | None = None
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    safe_error_code: SafeProviderErrorCode | None = None
+    started_at: AwareDatetime
+    finished_at: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def validate_queue_specific_fields(self) -> Self:
+        """Keep Outbox-only transport evidence off Inbox activity rows."""
+        if self.queue == "inbox" and (
+            self.failure_kind is not None or self.http_status is not None
+        ):
+            raise ValueError("inbox activity cannot contain transport failure fields")
+        return self
+
+
+class ProviderAttemptActivityFeed(_StrictProviderOperationsModel):
+    """Return a bounded recent attempt timeline for one tenant."""
+
+    items: tuple[ProviderAttemptActivity, ...] = Field(default_factory=tuple)
     generated_at: AwareDatetime
 
 

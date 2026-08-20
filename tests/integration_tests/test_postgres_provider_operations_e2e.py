@@ -297,6 +297,52 @@ async def test_supervisor_redrives_operation_then_outbox_worker_accepts_once(
     assert finalized.delivery_cycle == 2
     assert finalized.attempts_in_cycle == 1
 
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        activity = await client.get(
+            "/internal/provider-operations/attempts",
+            params={"limit": 10},
+            headers=_authorization(_SUPERVISOR_TOKEN),
+        )
+        other_tenant_activity = await client.get(
+            "/internal/provider-operations/attempts",
+            params={"limit": 10},
+            headers=_authorization(_OTHER_SUPERVISOR_TOKEN),
+        )
+
+    assert activity.status_code == other_tenant_activity.status_code == 200
+    own_attempt = next(
+        item
+        for item in activity.json()["items"]
+        if item["command_id"] == str(command.command_id)
+        and item["cycle"] == 2
+    )
+    assert own_attempt == {
+        "queue": "outbox",
+        "resource_id": str(command.command_id),
+        "command_id": str(command.command_id),
+        "cycle": 2,
+        "attempt_number": 1,
+        "outcome": "accepted",
+        "failure_kind": None,
+        "http_status": None,
+        "safe_error_code": None,
+        "started_at": own_attempt["started_at"],
+        "finished_at": own_attempt["finished_at"],
+    }
+    assert other_tenant_activity.json()["items"] == []
+    combined_activity = activity.text + other_tenant_activity.text
+    for forbidden in (
+        "payload",
+        "customer_id",
+        "source_message_id",
+        "provider_reference",
+        "provider_operation_id",
+        "worker_id",
+    ):
+        assert forbidden not in combined_activity
+
     async with pool.connection() as connection:
         async with connection.cursor(row_factory=dict_row) as cursor:
             await cursor.execute(
