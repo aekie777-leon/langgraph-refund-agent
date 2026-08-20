@@ -9,6 +9,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from agent.auth.demo_provider import DemoIdentityProvider
 from agent.auth.dependencies import require_access_scope
 from agent.auth.rbac import role_permissions
 from agent.auth.visibility import ForbiddenError
@@ -262,7 +263,10 @@ async def test_canonical_supervisor_can_read_and_redrive() -> None:
 async def test_missing_credentials_use_shared_401_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("DEMO_IDENTITY_TOKENS", raising=False)
+    monkeypatch.setattr(
+        "agent.auth.dependencies.get_identity_provider",
+        lambda: DemoIdentityProvider({}),
+    )
     app = _app_with_service(_service_mock(), scope=None)
 
     async with httpx.AsyncClient(

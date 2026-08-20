@@ -1,11 +1,18 @@
 """Configure application lifecycle resources for LangGraph API."""
 
+import json
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 
+from agent.auth.runtime import (
+    get_identity_runtime,
+    initialize_identity_runtime,
+    shutdown_identity_runtime,
+)
 from agent.cases.api import router as support_case_router
 from agent.cases.api_errors import register_case_exception_handlers
 from agent.cases.postgres_repository import PostgresCaseRepository
@@ -45,52 +52,80 @@ from agent.refunds.service import RefundService
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Open and close the application-scoped PostgreSQL connection pool."""
-    pool = create_async_connection_pool()
-    await pool.open()
+    await initialize_identity_runtime(
+        os.environ,
+        studio_auth_disabled=_studio_auth_disabled(),
+    )
     try:
-        await pool.wait()
-        _app.state.integration_repository = PostgresIntegrationRepository(pool)
-        _app.state.provider_operations_service = ProviderOperationsService(
-            PostgresProviderOperationsRepository(pool)
-        )
-        _app.state.provider_webhook_resolver = (
-            EnvironmentProviderWebhookConnectionResolver.from_environment()
-        )
-        _app.state.provider_webhook_adapter = CanonicalHmacWebhookAdapter()
-        configure_case_service(CaseService(PostgresCaseRepository(pool)))
-        configure_operation_dependencies(
-            order_provider=DemoOrderProvider(),
-            operation_service=OperationService(
-                PostgresOrderOperationRepository(pool),
-                provider_queue_failure_coordinator=PostgresProviderQueueFailureCoordinator(
-                    pool
-                ),
-            ),
-            provider_connection_resolver=(
-                EnvironmentProviderConnectionResolver.from_environment(
-                    allow_insecure_http=os.getenv("PROVIDER_ALLOW_INSECURE_HTTP")
-                    == "true"
-                )
-                if os.getenv("PROVIDER_CONNECTIONS_JSON")
-                else None
-            ),
-        )
-        configure_refund_service(RefundService(PostgresRefundRepository(pool)))
+        pool = create_async_connection_pool()
+        await pool.open()
         try:
-            yield
+            await pool.wait()
+            _app.state.integration_repository = PostgresIntegrationRepository(pool)
+            _app.state.provider_operations_service = ProviderOperationsService(
+                PostgresProviderOperationsRepository(pool)
+            )
+            _app.state.provider_webhook_resolver = (
+                EnvironmentProviderWebhookConnectionResolver.from_environment()
+            )
+            _app.state.provider_webhook_adapter = CanonicalHmacWebhookAdapter()
+            with ExitStack() as runtime_cleanup:
+                configure_case_service(
+                    CaseService(
+                        PostgresCaseRepository(pool),
+                        identity_directory=get_identity_runtime().directory,
+                    )
+                )
+                runtime_cleanup.callback(clear_case_service)
+                configure_operation_dependencies(
+                    order_provider=DemoOrderProvider(),
+                    operation_service=OperationService(
+                        PostgresOrderOperationRepository(pool),
+                        provider_queue_failure_coordinator=PostgresProviderQueueFailureCoordinator(
+                            pool
+                        ),
+                    ),
+                    provider_connection_resolver=(
+                        EnvironmentProviderConnectionResolver.from_environment(
+                            allow_insecure_http=os.getenv(
+                                "PROVIDER_ALLOW_INSECURE_HTTP"
+                            )
+                            == "true"
+                        )
+                        if os.getenv("PROVIDER_CONNECTIONS_JSON")
+                        else None
+                    ),
+                )
+                runtime_cleanup.callback(clear_operation_dependencies)
+                configure_refund_service(
+                    RefundService(PostgresRefundRepository(pool))
+                )
+                runtime_cleanup.callback(clear_refund_service)
+                yield
         finally:
-            clear_refund_service()
-            clear_operation_dependencies()
-            clear_case_service()
+            if hasattr(_app.state, "provider_operations_service"):
+                delattr(_app.state, "provider_operations_service")
+            await pool.close()
     finally:
-        if hasattr(_app.state, "provider_operations_service"):
-            delattr(_app.state, "provider_operations_service")
-        await pool.close()
+        await shutdown_identity_runtime()
+
+
+def _studio_auth_disabled() -> bool:
+    """Read the deployed LangGraph authentication policy without defaults."""
+    config_path = Path(__file__).resolve().parents[2] / "langgraph.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        value = config["auth"]["disable_studio_auth"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        raise RuntimeError("LangGraph authentication configuration is invalid") from None
+    if not isinstance(value, bool):
+        raise RuntimeError("LangGraph authentication configuration is invalid")
+    return value
 
 
 app = FastAPI(
     title="OpsPilot Internal API",
-    version="0.8.0",
+    version="0.9.0",
     lifespan=lifespan,
 )
 app.include_router(support_case_router)

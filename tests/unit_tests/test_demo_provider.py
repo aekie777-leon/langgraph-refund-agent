@@ -27,8 +27,13 @@ def _provider() -> DemoIdentityProvider:
     )
 
 
-def test_resolve_derives_permissions_from_role() -> None:
-    identity = _provider().resolve(authorization_header=f"Bearer {_CUSTOMER_TOKEN}")
+pytestmark = pytest.mark.anyio
+
+
+async def test_resolve_derives_permissions_from_role() -> None:
+    identity = await _provider().resolve(
+        authorization_header=f"Bearer {_CUSTOMER_TOKEN}"
+    )
 
     assert identity.user_id == "customer-a"
     assert identity.tenant_id == "tenant-demo"
@@ -38,28 +43,30 @@ def test_resolve_derives_permissions_from_role() -> None:
     )
 
 
-def test_resolve_rejects_unknown_token() -> None:
+async def test_resolve_rejects_unknown_token() -> None:
     with pytest.raises(UnauthenticatedError):
-        _provider().resolve(authorization_header="Bearer unknown-token")
+        await _provider().resolve(authorization_header="Bearer unknown-token")
 
 
-def test_resolve_rejects_missing_header() -> None:
+async def test_resolve_rejects_missing_header() -> None:
     with pytest.raises(UnauthenticatedError):
-        _provider().resolve(authorization_header=None)
+        await _provider().resolve(authorization_header=None)
 
 
-def test_resolve_rejects_non_bearer_scheme() -> None:
+async def test_resolve_rejects_non_bearer_scheme() -> None:
     with pytest.raises(UnauthenticatedError):
-        _provider().resolve(authorization_header=f"Basic {_CUSTOMER_TOKEN}")
+        await _provider().resolve(authorization_header=f"Basic {_CUSTOMER_TOKEN}")
 
 
-def test_from_env_defaults_to_empty_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_from_env_defaults_to_empty_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("DEMO_IDENTITY_TOKENS", raising=False)
 
     provider = DemoIdentityProvider.from_env()
 
     with pytest.raises(UnauthenticatedError):
-        provider.resolve(authorization_header="Bearer anything")
+        await provider.resolve(authorization_header="Bearer anything")
 
 
 def test_from_env_rejects_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,8 +83,8 @@ def test_from_env_rejects_non_object_json(monkeypatch: pytest.MonkeyPatch) -> No
         DemoIdentityProvider.from_env()
 
 
-def test_provider_has_no_implicit_tokens() -> None:
+async def test_provider_has_no_implicit_tokens() -> None:
     provider = DemoIdentityProvider({})
 
     with pytest.raises(UnauthenticatedError):
-        provider.resolve(authorization_header="Bearer anything")
+        await provider.resolve(authorization_header="Bearer anything")

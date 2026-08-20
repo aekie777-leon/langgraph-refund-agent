@@ -1,6 +1,7 @@
 """Unit tests for PostgreSQL pool lifecycle and webhook runtime wiring."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,6 +37,27 @@ class FakePool:
         self.calls.append("close")
 
 
+def _patch_identity_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[str] | None = None,
+) -> None:
+    async def initialize(*_args, **_kwargs) -> None:
+        if calls is not None:
+            calls.append("identity_open")
+
+    async def shutdown() -> None:
+        if calls is not None:
+            calls.append("identity_close")
+
+    monkeypatch.setattr(webapp, "initialize_identity_runtime", initialize)
+    monkeypatch.setattr(webapp, "shutdown_identity_runtime", shutdown)
+    monkeypatch.setattr(
+        webapp,
+        "get_identity_runtime",
+        lambda: SimpleNamespace(directory=None),
+    )
+
+
 async def test_lifespan_opens_configures_and_closes_resources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -43,6 +65,8 @@ async def test_lifespan_opens_configures_and_closes_resources(
     configured: list[CaseService] = []
     configured_operations: list[dict[str, object]] = []
     cleared: list[bool] = []
+    identity_calls: list[str] = []
+    _patch_identity_lifecycle(monkeypatch, identity_calls)
     monkeypatch.setattr(webapp, "create_async_connection_pool", lambda: pool)
     monkeypatch.setattr(
         webapp,
@@ -91,6 +115,7 @@ async def test_lifespan_opens_configures_and_closes_resources(
 
     assert pool.calls == ["open", "wait", "close"]
     assert cleared == [True]
+    assert identity_calls == ["identity_open", "identity_close"]
     assert not hasattr(webapp.app.state, "provider_operations_service")
 
 
@@ -105,8 +130,8 @@ def test_production_app_registers_the_provider_webhook_route() -> None:
     )
 
 
-def test_production_app_reports_v080() -> None:
-    assert webapp.app.version == "0.8.0"
+def test_production_app_reports_v090() -> None:
+    assert webapp.app.version == "0.9.0"
 
 
 def test_production_app_preserves_case_routes_and_adds_exact_provider_ops_routes() -> (
@@ -140,6 +165,8 @@ async def test_lifespan_closes_an_open_pool_when_initialization_fails(
             raise RuntimeError("pool initialization failed")
 
     pool = FailingPool()
+    identity_calls: list[str] = []
+    _patch_identity_lifecycle(monkeypatch, identity_calls)
     monkeypatch.setattr(webapp, "create_async_connection_pool", lambda: pool)
 
     with pytest.raises(RuntimeError, match="pool initialization failed"):
@@ -147,12 +174,48 @@ async def test_lifespan_closes_an_open_pool_when_initialization_fails(
             pass
 
     assert pool.calls == ["open", "wait", "close"]
+    assert identity_calls == ["identity_open", "identity_close"]
+
+
+async def test_lifespan_clears_partial_runtime_configuration_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = FakePool()
+    identity_calls: list[str] = []
+    cleared: list[str] = []
+    _patch_identity_lifecycle(monkeypatch, identity_calls)
+    monkeypatch.setattr(webapp, "create_async_connection_pool", lambda: pool)
+    monkeypatch.setattr(webapp, "configure_case_service", lambda _service: None)
+
+    def fail_operation_configuration(**_kwargs) -> None:
+        raise RuntimeError("operation configuration failed")
+
+    monkeypatch.setattr(
+        webapp,
+        "configure_operation_dependencies",
+        fail_operation_configuration,
+    )
+    monkeypatch.setattr(
+        webapp,
+        "clear_case_service",
+        lambda: cleared.append("case"),
+    )
+
+    with pytest.raises(RuntimeError, match="operation configuration failed"):
+        async with webapp.lifespan(webapp.app):
+            pass
+
+    assert cleared == ["case"]
+    assert pool.calls == ["open", "wait", "close"]
+    assert identity_calls == ["identity_open", "identity_close"]
 
 
 async def test_lifespan_closes_an_open_pool_when_cancelled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pool = FakePool()
+    identity_calls: list[str] = []
+    _patch_identity_lifecycle(monkeypatch, identity_calls)
     monkeypatch.setattr(webapp, "create_async_connection_pool", lambda: pool)
     monkeypatch.setattr(webapp, "configure_case_service", lambda _service: None)
     monkeypatch.setattr(
@@ -168,3 +231,4 @@ async def test_lifespan_closes_an_open_pool_when_cancelled(
             raise asyncio.CancelledError()
 
     assert pool.calls == ["open", "wait", "close"]
+    assert identity_calls == ["identity_open", "identity_close"]

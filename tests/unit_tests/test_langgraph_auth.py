@@ -5,6 +5,7 @@ from langgraph_sdk import Auth
 
 import agent.auth.langgraph_auth as module
 from agent.auth.demo_provider import DemoIdentityProvider
+from agent.auth.provider import IdentityInfrastructureUnavailableError
 
 pytestmark = pytest.mark.anyio
 
@@ -51,7 +52,12 @@ def _ctx(role: str = "customer", user_id: str = "customer-a") -> FakeCtx:
     )
 
 
-async def test_authenticate_rejects_missing_credentials() -> None:
+async def test_authenticate_rejects_missing_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module, "get_identity_provider", lambda: DemoIdentityProvider({})
+    )
     with pytest.raises(Auth.exceptions.HTTPException) as error:
         await module.authenticate(authorization=None)
 
@@ -61,19 +67,16 @@ async def test_authenticate_rejects_missing_credentials() -> None:
 async def test_authenticate_returns_trusted_claims(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        module,
-        "_provider",
-        DemoIdentityProvider(
-            {
-                "demo-token-customer-a": {
-                    "user_id": "customer-a",
-                    "tenant_id": "tenant-demo",
-                    "role": "customer",
-                }
+    provider = DemoIdentityProvider(
+        {
+            "demo-token-customer-a": {
+                "user_id": "customer-a",
+                "tenant_id": "tenant-demo",
+                "role": "customer",
             }
-        ),
+        }
     )
+    monkeypatch.setattr(module, "get_identity_provider", lambda: provider)
 
     claims = await module.authenticate(authorization="Bearer demo-token-customer-a")
 
@@ -82,6 +85,26 @@ async def test_authenticate_returns_trusted_claims(
     assert claims["user_id"] == "customer-a"
     assert claims["tenant_id"] == "tenant-demo"
     assert "orders:operate:own" in claims["permissions"]
+
+
+async def test_authenticate_maps_identity_outage_to_safe_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnavailableProvider:
+        async def resolve(self, *, authorization_header: str | None):
+            raise IdentityInfrastructureUnavailableError(
+                "GET https://idp.invalid/?token=must-not-leak"
+            )
+
+    provider = UnavailableProvider()
+    monkeypatch.setattr(module, "get_identity_provider", lambda: provider)
+
+    with pytest.raises(Auth.exceptions.HTTPException) as error:
+        await module.authenticate(authorization="Bearer opaque")
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "Identity service unavailable"
+    assert "must-not-leak" not in str(error.value)
 
 
 async def test_threads_create_stamps_ownership_metadata() -> None:

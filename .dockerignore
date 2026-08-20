@@ -46,6 +46,7 @@ Makefile
 Dockerfile
 .dockerignore
 compose.yaml
+langgraph.dev.json
 
 # Editors and operating-system files
 .vscode/

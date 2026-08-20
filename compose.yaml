@@ -1,5 +1,8 @@
 name: langgraph-refund-agent
 
+# Local development only. Production must use an external TLS PostgreSQL,
+# production OIDC/SCIM settings, and a separately managed gateway.
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -22,7 +25,7 @@ services:
       start_period: 10s
 
   case-migrations:
-    image: langgraph-refund-agent:0.8.0
+    image: langgraph-refund-agent:0.9.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -44,7 +47,7 @@ services:
       retries: 10
 
   langgraph-api:
-    image: langgraph-refund-agent:0.8.0
+    image: langgraph-refund-agent:0.9.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -67,7 +70,7 @@ services:
         condition: service_healthy
 
   outbox-worker:
-    image: langgraph-refund-agent:0.8.0
+    image: langgraph-refund-agent:0.9.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -85,7 +88,7 @@ services:
         condition: service_healthy
 
   inbox-worker:
-    image: langgraph-refund-agent:0.8.0
+    image: langgraph-refund-agent:0.9.0
     build:
       context: .
       dockerfile: Dockerfile

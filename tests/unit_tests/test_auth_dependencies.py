@@ -9,7 +9,10 @@ from httpx import ASGITransport, AsyncClient
 from agent.auth.demo_provider import DemoIdentityProvider
 from agent.auth.dependencies import parse_access_scope, require_access_scope
 from agent.auth.models import AccessScope
-from agent.auth.provider import UnauthenticatedError
+from agent.auth.provider import (
+    IdentityInfrastructureUnavailableError,
+    UnauthenticatedError,
+)
 
 
 def _provider() -> DemoIdentityProvider:
@@ -24,8 +27,9 @@ def _provider() -> DemoIdentityProvider:
     )
 
 
-def test_parse_access_scope_resolves_a_trusted_scope() -> None:
-    scope = parse_access_scope(
+@pytest.mark.anyio
+async def test_parse_access_scope_resolves_a_trusted_scope() -> None:
+    scope = await parse_access_scope(
         authorization_header="Bearer demo-token-customer-a",
         provider=_provider(),
     )
@@ -35,9 +39,10 @@ def test_parse_access_scope_resolves_a_trusted_scope() -> None:
     assert scope.role == "customer"
 
 
-def test_parse_access_scope_rejects_unknown_tokens() -> None:
+@pytest.mark.anyio
+async def test_parse_access_scope_rejects_unknown_tokens() -> None:
     with pytest.raises(UnauthenticatedError):
-        parse_access_scope(
+        await parse_access_scope(
             authorization_header="Bearer unknown",
             provider=_provider(),
         )
@@ -47,7 +52,10 @@ def test_parse_access_scope_rejects_unknown_tokens() -> None:
 async def test_fastapi_dependency_maps_missing_credentials_to_401(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("DEMO_IDENTITY_TOKENS", raising=False)
+    monkeypatch.setattr(
+        "agent.auth.dependencies.get_identity_provider",
+        lambda: DemoIdentityProvider({}),
+    )
     app = FastAPI()
 
     @app.get("/protected")
@@ -65,3 +73,38 @@ async def test_fastapi_dependency_maps_missing_credentials_to_401(
     assert response.status_code == 401
     assert response.json() == {"detail": "Unauthorized"}
     assert response.headers["www-authenticate"] == "Bearer"
+
+
+@pytest.mark.anyio
+async def test_fastapi_dependency_maps_identity_outage_to_safe_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnavailableProvider:
+        async def resolve(self, *, authorization_header: str | None):
+            raise IdentityInfrastructureUnavailableError(
+                "GET https://idp.invalid/?token=must-not-leak"
+            )
+
+    monkeypatch.setattr(
+        "agent.auth.dependencies.get_identity_provider",
+        lambda: UnavailableProvider(),
+    )
+    app = FastAPI()
+
+    @app.get("/protected")
+    async def protected_route(
+        scope: Annotated[AccessScope, Depends(require_access_scope)],
+    ) -> dict[str, str]:
+        return {"user_id": scope.user_id}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/protected", headers={"Authorization": "Bearer opaque"}
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Identity service unavailable"}
+    assert "must-not-leak" not in response.text

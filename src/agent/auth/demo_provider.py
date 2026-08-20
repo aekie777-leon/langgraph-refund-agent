@@ -2,8 +2,10 @@
 
 import json
 import os
+from collections.abc import Mapping
 from typing import cast
 
+from agent.auth.directory import DirectoryUser
 from agent.auth.models import AuthenticatedIdentity, Role
 from agent.auth.provider import UnauthenticatedError
 from agent.auth.rbac import role_permissions
@@ -29,7 +31,17 @@ class DemoIdentityProvider:
     @classmethod
     def from_env(cls, variable: str = "DEMO_IDENTITY_TOKENS") -> "DemoIdentityProvider":
         """Load demo identities from a JSON environment variable."""
-        raw = os.getenv(variable)
+        return cls.from_environment(os.environ, variable=variable)
+
+    @classmethod
+    def from_environment(
+        cls,
+        environment: Mapping[str, str],
+        *,
+        variable: str = "DEMO_IDENTITY_TOKENS",
+    ) -> "DemoIdentityProvider":
+        """Load demo identities from an explicit runtime environment."""
+        raw = environment.get(variable)
         if not raw or not raw.strip():
             return cls({})
         try:
@@ -40,13 +52,34 @@ class DemoIdentityProvider:
             raise RuntimeError(f"{variable} must be a JSON object")
         return cls(tokens)
 
-    def resolve(self, *, authorization_header: str | None) -> AuthenticatedIdentity:
+    async def resolve(
+        self, *, authorization_header: str | None
+    ) -> AuthenticatedIdentity:
         """Resolve a bearer token into a trusted identity or reject it."""
         token = self._extract_bearer(authorization_header)
         identity = self._identities.get(token) if token is not None else None
         if identity is None:
             raise UnauthenticatedError("Unknown or missing demo token")
         return identity
+
+    async def find_user(
+        self, *, tenant_id: str, user_id: str
+    ) -> DirectoryUser | None:
+        """Expose configured demo identities as an active local directory."""
+        matches = {
+            (identity.tenant_id, identity.user_id, identity.role)
+            for identity in self._identities.values()
+            if identity.tenant_id == tenant_id and identity.user_id == user_id
+        }
+        if not matches:
+            return None
+        roles = frozenset(match[2] for match in matches)
+        return DirectoryUser(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            active=True,
+            roles=roles,
+        )
 
     @staticmethod
     def _extract_bearer(authorization_header: str | None) -> str | None:

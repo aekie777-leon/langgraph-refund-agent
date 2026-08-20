@@ -13,6 +13,11 @@ from fastapi import FastAPI
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from agent.auth.runtime import (
+    configure_identity_runtime,
+    create_identity_runtime,
+    shutdown_identity_runtime,
+)
 from agent.cases.postgres_repository import PostgresCaseRepository
 from agent.integrations.finalization import PostgresOutboxFinalizer
 from agent.integrations.inbox_postgres_finalizer import PostgresInboxFinalizer
@@ -81,10 +86,23 @@ async def postgres_context() -> AsyncIterator[tuple[AsyncConnectionPool, str]]:
         yield context
 
 
+@pytest.fixture(autouse=True)
+async def clean_identity_runtime() -> AsyncIterator[None]:
+    """Keep each shared-runtime E2E isolated from every neighboring test."""
+    await shutdown_identity_runtime()
+    try:
+        yield
+    finally:
+        await shutdown_identity_runtime()
+
+
 def _configure_demo_identities(
     monkeypatch: pytest.MonkeyPatch,
     tenant_id: str,
 ) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("IDENTITY_PROVIDER", "demo")
+    monkeypatch.setenv("IDENTITY_DIRECTORY", "none")
     monkeypatch.setenv(
         "DEMO_IDENTITY_TOKENS",
         json.dumps(
@@ -106,6 +124,12 @@ def _configure_demo_identities(
                 },
             }
         ),
+    )
+    configure_identity_runtime(
+        create_identity_runtime(
+            os.environ,
+            studio_auth_disabled=True,
+        )
     )
 
 

@@ -2,7 +2,25 @@
 
 A small, risk-aware customer-service assistant built with LangGraph. It classifies order operations, refund requests, order inquiries, delivery issues, and complaints; performs deterministic and semantic risk checks; keeps business eligibility decisions deterministic; asks for confirmation before state-changing operations; and stores order operations, refund requests, support cases, and immutable events in PostgreSQL.
 
-Version: `0.8.0`
+Version: `0.9.0`
+
+## What's new in v0.9.0
+
+- Replaces production demo authentication with one vendor-neutral async OIDC
+  JWT runtime shared by FastAPI and LangGraph Server
+- Verifies fixed issuer, audience, asymmetric algorithm, signature, time
+  claims, and `kid`; JWKS caching has bounded refresh and fail-closed outage
+  behavior
+- Maps stable tenant/user claims and allowlisted groups into `AccessScope`;
+  permissions remain server-derived RBAC and token permissions are rejected
+- Adds a read-only SCIM 2.0 directory boundary so assignment accepts only an
+  active same-tenant support agent or supervisor without identity enumeration
+- Makes production startup fail closed on demo auth, Studio bypass, missing or
+  unreachable OIDC/SCIM, plaintext Provider HTTP, or local/plaintext PostgreSQL
+- Defines the external TLS PostgreSQL, gateway, readiness, rollback, privacy,
+  and local-only Compose contract without deploying or storing production data
+- Preserves the Graph workflow, Provider wire schema, migrations 0001-0008,
+  canonical actor format, v0.8 data, and explicit local demo mode
 
 ## What's new in v0.8.0
 
@@ -345,7 +363,7 @@ LangGraph's internal tables.
 Install and run the LangGraph development server:
 
 ```bash
-uv run --with "langgraph-cli[inmem]" langgraph dev
+uv run --with "langgraph-cli[inmem]" langgraph dev --config langgraph.dev.json
 ```
 
 The `uv run --with` form runs the CLI inside the project's virtual environment
@@ -355,12 +373,17 @@ so the installed `agent` package is importable. The server starts on port
 Before talking to the API, configure demo identities in `.env`:
 
 ```dotenv
+APP_ENV=development
+IDENTITY_PROVIDER=demo
+IDENTITY_DIRECTORY=none
 DEMO_IDENTITY_TOKENS={"demo-customer-token":{"user_id":"customer-a","tenant_id":"tenant-demo","role":"customer"}}
 ```
 
 Every request must then send `Authorization: Bearer demo-customer-token`.
 
-The graph entry point is configured in `langgraph.json` as `agent.graph:create_graph` through the source file path.
+The development command explicitly selects `langgraph.dev.json`. The committed
+`langgraph.json` is the production-safe profile and must not be used to bypass
+custom authentication during local Studio setup.
 
 The Provider workers are separate processes and do not run inside LangGraph or
 FastAPI. After applying migrations, start them in separate terminals when
@@ -602,25 +625,27 @@ suite on both supported Python versions.
 - Never commit `.env` or real credentials. The repository ignores `.env` by default.
 - The included order database is demonstration data, not customer data.
 - The demo identity provider maps bearer tokens from `DEMO_IDENTITY_TOKENS`
-  and is deterministic local-development infrastructure only, not
-  production-grade authentication. Production must replace
-  `IdentityProvider` with the customer's OAuth/OIDC, SSO, or identity system.
-- Assignment (`POST /{case_id}/assign`) validates the agent identifier but
-  does not verify the agent exists in a user directory; production must
-  resolve assignees against the real identity system.
+  and is deterministic local-development infrastructure only. Production mode
+  rejects demo authentication and requires configured OIDC plus read-only SCIM.
+- Assignment (`POST /{case_id}/assign`) requires an active same-tenant target
+  with a mapped `support_agent` or `supervisor` role. Missing, cross-tenant,
+  inactive, and wrong-role targets share one non-enumerating result.
 - A production service must authenticate users and verify that an order
   belongs to the requesting user.
-- Add authorization, audit logging, monitoring, rate limits, encrypted secret
-  management, and a real order service before production use.
+- v0.9 supplies authorization and identity audit invariants, but a real
+  deployment still requires managed secrets, gateway rate limits and log
+  redaction, monitoring, and a real order service.
 - Review the refund policy and manual-review threshold with the responsible business and legal teams.
 - Risk and manual-refund handoffs are persisted as support cases, but no external customer-service queue adapter is connected yet.
 - The internal support-case API is authenticated and role-protected from
   v0.6. Compose binds it to `127.0.0.1`; do not expose it to an external
   network without additional gateway controls such as rate limiting.
-- The Provider operations API is Supervisor-only and field-whitelisted, but
-  v0.8 does not approve production deployment. Keep it behind an internal
-  gateway and replace the demo identity boundary before any production use.
-- v0.8 intentionally does not include an operations UI, retention cleanup,
+- The Provider operations API is Supervisor-only and field-whitelisted. The
+  v0.9 production contract requires an internal gateway and independently
+  verified Bearer tokens; forwarded identity headers are never trusted.
+- v0.9 does not perform or approve a real production deployment. See
+  `docs/v0.9_identity_access.md` for the exact production envelope and runbook.
+- v0.9 intentionally does not include an operations UI, retention cleanup,
   Worker heartbeat/Prometheus metrics, a distributed limiter or external
   queue, or dynamic Provider key rotation.
 - Human-request and formal-complaint detection use LLM structured output and therefore require production evaluation against representative multilingual conversations.
@@ -637,7 +662,24 @@ Released under the MIT License. See `LICENSE`.
 
 这是一个使用 LangGraph 构建的小型风险感知客服助手。它可以识别订单操作、退款申请、订单查询、物流问题和投诉，在 LLM 语义风险分类前执行确定性风险规则检测，使用确定性规则判断业务资格，在会改变状态的操作前请求用户确认，并把订单操作、退款申请、人工工单和不可变事件保存到 PostgreSQL。
 
-版本：`0.8.0`
+版本：`0.9.0`
+
+## v0.9.0 新增内容
+
+- 使用 vendor-neutral 的异步 OIDC JWT runtime 替代生产 demo 认证，FastAPI
+  与 LangGraph Server 共用同一配置、校验器和 claim policy；
+- 固定 issuer、audience、非对称算法白名单并校验签名、时间 claim 与 `kid`，
+  JWKS 使用有界缓存、单次 unknown-kid refresh 与 fail-closed outage 语义；
+- tenant/user 只来自受信 claim，角色只来自 allowlisted group mapping，权限
+  继续由服务端 RBAC 推导并拒绝 token 自带 permissions；
+- 新增只读 SCIM 2.0 人员目录，工单只能分配给同 tenant、active 且为客服或
+  supervisor 的目标，同时避免跨租户身份枚举；
+- 生产启动会拒绝 demo auth、Studio bypass、不可用的 OIDC/SCIM、明文
+  Provider HTTP，以及本地或非 TLS PostgreSQL；
+- 明确外部 TLS PostgreSQL、gateway、readiness、rollback、隐私和本地 Compose
+  契约，但不执行真实部署，也不保存生产 secrets；
+- 保持 Graph workflow、Provider wire schema、0001-0008 migration、actor 格式、
+  v0.8 数据和显式本地 demo 模式兼容。
 
 ## v0.8.0 新增内容
 
@@ -955,7 +997,7 @@ uv run python scripts/apply_migrations.py
 启动 LangGraph 开发服务器：
 
 ```bash
-uv run --with "langgraph-cli[inmem]" langgraph dev
+uv run --with "langgraph-cli[inmem]" langgraph dev --config langgraph.dev.json
 ```
 
 `uv run --with` 会在项目自己的虚拟环境中运行 CLI，保证已安装的 `agent`
@@ -964,12 +1006,16 @@ uv run --with "langgraph-cli[inmem]" langgraph dev
 调用 API 前，先在 `.env` 中配置 demo 身份：
 
 ```dotenv
+APP_ENV=development
+IDENTITY_PROVIDER=demo
+IDENTITY_DIRECTORY=none
 DEMO_IDENTITY_TOKENS={"demo-customer-token":{"user_id":"customer-a","tenant_id":"tenant-demo","role":"customer"}}
 ```
 
 之后每个请求都需要携带 `Authorization: Bearer demo-customer-token`。
 
-图入口已在 `langgraph.json` 中配置。
+本地命令会显式选择 `langgraph.dev.json`。仓库中的 `langgraph.json` 是生产安全
+profile，本地 Studio 配置不能借此绕过 custom auth。
 
 Provider Worker 是独立进程，不会在 LangGraph 或 FastAPI 内启动。应用迁移后，
 可在不同终端启动异步 Provider 流程：
@@ -1194,20 +1240,23 @@ PostgreSQL 16 服务，并在两个受支持的 Python 版本上执行这些测�
 - 不要提交 `.env` 或任何真实密钥；仓库已经默认忽略 `.env`。
 - 内置订单只是演示数据，不能保存真实客户信息。
 - demo 身份提供者从 `DEMO_IDENTITY_TOKENS` 解析 Bearer Token，仅用于本地
-  确定性开发，不是生产级认证；生产环境必须把 `IdentityProvider` 替换为
-  客户 OAuth/OIDC、SSO 或自建身份系统。
-- 工单分配（`POST /{case_id}/assign`）只校验客服标识格式，不验证该客服
-  是否真实存在于用户目录；生产环境必须对接真实身份系统解析被分配人。
+  确定性开发。生产模式会拒绝 demo auth，并要求配置 OIDC 与只读 SCIM。
+- 工单分配（`POST /{case_id}/assign`）要求目标人员同 tenant、active 且映射为
+  `support_agent` 或 `supervisor`；missing、cross-tenant、inactive 和 wrong-role
+  使用同一不枚举结果。
 - 生产服务必须验证用户身份，并确认订单确实属于发起请求的用户。
-- 上线前需要补充权限控制、审计日志、监控、限流和加密密钥管理，并接入真实订单服务。
+- v0.9 已提供权限和身份审计不变量；真实上线仍需要托管 secrets、网关限流与
+  日志脱敏、监控，并接入真实订单服务。
 - 退款规则和人工审核金额阈值需要由相应的业务及法务人员确认。
 - 风险和大额退款交接已经持久化为人工工单，但尚未连接外部客户客服队列适配器。
 - 内部工单 API 自 v0.6 起已启用认证与角色保护。Compose 只把它绑定到
   `127.0.0.1`；在没有额外的网关控制（如限流）之前，不应将该接口暴露到
   外部网络。
-- Provider 运维 API 仅允许 supervisor 且采用字段白名单，但 v0.8 并未批准
-  生产部署。任何生产使用前都必须放在内部网关后，并替换 demo 身份边界。
-- v0.8 明确不包含运维 UI、retention cleanup、Worker heartbeat / Prometheus、
+- Provider 运维 API 仅允许 supervisor 且采用字段白名单。v0.9 生产契约要求
+  内部网关与应用自行验证 Bearer Token，绝不信任 forwarded identity header。
+- v0.9 不执行或批准真实生产部署；完整生产 envelope 与 runbook 见
+  `docs/v0.9_identity_access.md`。
+- v0.9 明确不包含运维 UI、retention cleanup、Worker heartbeat / Prometheus、
   分布式限流器或外部队列，以及 Provider 动态密钥轮换。
 - 真人请求和正式投诉识别依赖 LLM 结构化输出，上线前仍需使用有代表性的多语言对话进行评测。
 - 内置风险规则是有意保持保守的演示数据，并不是完整的安全或合规词库。

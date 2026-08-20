@@ -11,7 +11,10 @@ import pytest
 from fastapi import FastAPI
 from psycopg_pool import AsyncConnectionPool
 
+from agent.auth.config import ScimDirectoryConfig
 from agent.auth.dependencies import require_access_scope
+from agent.auth.directory import DirectoryInfrastructureUnavailableError
+from agent.auth.scim_directory import ScimIdentityDirectory
 from agent.cases.api import router as case_api_router
 from agent.cases.api_errors import register_case_exception_handlers
 from agent.cases.models import (
@@ -28,7 +31,7 @@ from agent.cases.repository import (
     DuplicateIdempotencyKeyError,
 )
 from agent.cases.runtime import get_case_service
-from agent.cases.service import CaseService
+from agent.cases.service import AssignmentTargetUnavailableError, CaseService
 from agent.database import create_async_connection_pool
 from agent.migrations import apply_migrations
 from tests.fakes.identity import make_scope
@@ -37,6 +40,41 @@ pytestmark = [pytest.mark.anyio, pytest.mark.postgres]
 NOW = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
 SCOPE = make_scope("customer")
 SUPERVISOR_SCOPE = make_scope("supervisor", user_id="sup-1")
+_SCIM_LIST_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:ListResponse"
+_SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
+
+
+def _scim_config() -> ScimDirectoryConfig:
+    return ScimDirectoryConfig.model_validate(
+        {
+            "base_url": "https://directory.example.test/scim/v2",
+            "bearer_token": "integration-scim-secret",
+            "user_id_attribute": "externalId",
+            "tenant_id_attribute": "tenantId",
+            "active_attribute": "active",
+            "roles_attribute": "roles",
+            "role_mapping": {
+                "support_agent": ["Refund Agent"],
+                "supervisor": ["Refund Supervisor"],
+            },
+        }
+    )
+
+
+def _scim_list_response(*, tenant_id: str, active: bool = True) -> dict:
+    return {
+        "schemas": [_SCIM_LIST_SCHEMA],
+        "totalResults": 1,
+        "Resources": [
+            {
+                "schemas": [_SCIM_USER_SCHEMA],
+                "externalId": "agent-7",
+                "tenantId": tenant_id,
+                "active": active,
+                "roles": [{"value": "Refund Agent"}],
+            }
+        ],
+    }
 
 
 @pytest.fixture
@@ -372,3 +410,145 @@ async def test_internal_api_round_trips_case_status_and_events(
     assert events.status_code == 200
     assert events.json()["total"] == 2
     assert any(item["actor"] == SUPERVISOR_SCOPE.identity for item in events.json()["items"])
+
+
+@pytest.mark.parametrize(
+    ("tenant_id", "active"),
+    [("tenant-other", True), ("tenant-demo", False)],
+)
+async def test_scim_rejected_assignment_does_not_write_postgres(
+    postgres_context: tuple[AsyncConnectionPool, str],
+    tenant_id: str,
+    active: bool,
+) -> None:
+    pool, thread_id = postgres_context
+    repository = PostgresCaseRepository(pool)
+    creator = CaseService(repository, clock=lambda: NOW)
+    created = await creator.record_handoff(
+        SCOPE,
+        trigger=_trigger(thread_id, "scim-rejected-message"),
+        decision=_decision(),
+    )
+    assert created.case is not None
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_scim_list_response(tenant_id=tenant_id, active=active),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = CaseService(
+            repository,
+            identity_directory=ScimIdentityDirectory(_scim_config(), client),
+            clock=lambda: NOW,
+        )
+        with pytest.raises(AssignmentTargetUnavailableError):
+            await service.assign_case(
+                SUPERVISOR_SCOPE,
+                case_id=created.case.case_id,
+                agent_id="agent-7",
+                request_id="scim-rejected-assignment",
+            )
+
+    stored = await repository.get_case(SUPERVISOR_SCOPE, created.case.case_id)
+    events = await repository.list_case_events(
+        SUPERVISOR_SCOPE,
+        case_id=created.case.case_id,
+        limit=100,
+        offset=0,
+    )
+    assert stored == created.case
+    assert events.total == 1
+
+
+async def test_scim_outage_does_not_write_postgres(
+    postgres_context: tuple[AsyncConnectionPool, str],
+) -> None:
+    pool, thread_id = postgres_context
+    repository = PostgresCaseRepository(pool)
+    creator = CaseService(repository, clock=lambda: NOW)
+    created = await creator.record_handoff(
+        SCOPE,
+        trigger=_trigger(thread_id, "scim-outage-message"),
+        decision=_decision(),
+    )
+    assert created.case is not None
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="upstream detail must remain private")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = CaseService(
+            repository,
+            identity_directory=ScimIdentityDirectory(_scim_config(), client),
+            clock=lambda: NOW,
+        )
+        with pytest.raises(DirectoryInfrastructureUnavailableError) as error:
+            await service.assign_case(
+                SUPERVISOR_SCOPE,
+                case_id=created.case.case_id,
+                agent_id="agent-7",
+                request_id="scim-outage-assignment",
+            )
+
+    assert str(error.value) == "identity infrastructure is unavailable"
+    stored = await repository.get_case(SUPERVISOR_SCOPE, created.case.case_id)
+    events = await repository.list_case_events(
+        SUPERVISOR_SCOPE,
+        case_id=created.case.case_id,
+        limit=100,
+        offset=0,
+    )
+    assert stored == created.case
+    assert events.total == 1
+
+
+async def test_scim_assignment_is_idempotent_under_postgres_concurrency(
+    postgres_context: tuple[AsyncConnectionPool, str],
+) -> None:
+    pool, thread_id = postgres_context
+    repository = PostgresCaseRepository(pool)
+    creator = CaseService(repository, clock=lambda: NOW)
+    created = await creator.record_handoff(
+        SCOPE,
+        trigger=_trigger(thread_id, "scim-concurrent-message"),
+        decision=_decision(),
+    )
+    assert created.case is not None
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_scim_list_response(tenant_id="tenant-demo"),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = CaseService(
+            repository,
+            identity_directory=ScimIdentityDirectory(_scim_config(), client),
+            clock=lambda: NOW,
+        )
+        results = await asyncio.gather(
+            *(
+                service.assign_case(
+                    SUPERVISOR_SCOPE,
+                    case_id=created.case.case_id,
+                    agent_id="agent-7",
+                    request_id="scim-concurrent-assignment",
+                )
+                for _ in range(2)
+            )
+        )
+
+    assert {result.action for result in results} == {"assigned", "status_unchanged"}
+    stored = await repository.get_case(SUPERVISOR_SCOPE, created.case.case_id)
+    events = await repository.list_case_events(
+        SUPERVISOR_SCOPE,
+        case_id=created.case.case_id,
+        limit=100,
+        offset=0,
+    )
+    assert stored is not None
+    assert stored.assigned_agent_id == "agent-7"
+    assert events.total == 2

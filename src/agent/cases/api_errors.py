@@ -3,6 +3,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from agent.auth.directory import DirectoryInfrastructureUnavailableError
 from agent.auth.visibility import ForbiddenError
 from agent.cases.api_models import ApiErrorDetail, ApiErrorResponse
 from agent.cases.policy import InvalidCaseStatusTransition
@@ -11,6 +12,7 @@ from agent.cases.repository import (
     CasePersistenceError,
     ConcurrentCaseUpdateError,
 )
+from agent.cases.service import AssignmentTargetUnavailableError
 
 
 def _error_response(
@@ -48,6 +50,30 @@ async def _case_not_found_handler(
         status_code=404,
         code="case_not_found",
         message="The requested support case does not exist.",
+    )
+
+
+async def _assignment_target_unavailable_handler(
+    _request: Request,
+    error: Exception,
+) -> JSONResponse:
+    assert isinstance(error, AssignmentTargetUnavailableError)
+    return _error_response(
+        status_code=404,
+        code="assignment_target_unavailable",
+        message="The requested assignment target is not available.",
+    )
+
+
+async def _directory_unavailable_handler(
+    _request: Request,
+    error: Exception,
+) -> JSONResponse:
+    assert isinstance(error, DirectoryInfrastructureUnavailableError)
+    return _error_response(
+        status_code=503,
+        code="identity_directory_unavailable",
+        message="The identity directory is temporarily unavailable.",
     )
 
 
@@ -91,6 +117,14 @@ def register_case_exception_handlers(app: FastAPI) -> None:
     """Register domain-specific handlers on the custom FastAPI app."""
     app.add_exception_handler(ForbiddenError, _forbidden_handler)
     app.add_exception_handler(CaseNotFoundError, _case_not_found_handler)
+    app.add_exception_handler(
+        AssignmentTargetUnavailableError,
+        _assignment_target_unavailable_handler,
+    )
+    app.add_exception_handler(
+        DirectoryInfrastructureUnavailableError,
+        _directory_unavailable_handler,
+    )
     app.add_exception_handler(
         InvalidCaseStatusTransition,
         _invalid_transition_handler,

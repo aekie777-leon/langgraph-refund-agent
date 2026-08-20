@@ -1,0 +1,16 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "./src/agent/graph.py:create_graph"
+  },
+  "http": {
+    "app": "./src/agent/webapp.py:app"
+  },
+  "auth": {
+    "path": "./src/agent/auth/langgraph_auth.py:auth",
+    "disable_studio_auth": false
+  },
+  "env": ".env",
+  "image_distro": "wolfi"
+}

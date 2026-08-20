@@ -8,6 +8,10 @@ import pytest
 from fastapi import FastAPI
 
 from agent.auth.dependencies import require_access_scope
+from agent.auth.directory import (
+    DirectoryInfrastructureUnavailableError,
+    DirectoryUser,
+)
 from agent.auth.models import AccessScope
 from agent.cases.api import router
 from agent.cases.api_errors import register_case_exception_handlers
@@ -16,7 +20,7 @@ from agent.cases.policy import determine_handoff_policy
 from agent.cases.repository import CasePersistenceError
 from agent.cases.runtime import get_case_service
 from agent.cases.service import CaseService
-from tests.fakes.identity import make_scope
+from tests.fakes.identity import make_scope, staff_directory
 from tests.support_cases import InMemoryCaseRepository
 
 pytestmark = pytest.mark.anyio
@@ -24,6 +28,14 @@ NOW = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
 SCOPE = make_scope("customer")
 SUPERVISOR_SCOPE = make_scope("supervisor", user_id="sup-1")
 AGENT_SCOPE = make_scope("support_agent", user_id="agent-7")
+
+
+def _case_service(repository: InMemoryCaseRepository) -> CaseService:
+    return CaseService(
+        repository,
+        identity_directory=staff_directory(),
+        clock=lambda: NOW,
+    )
 
 
 @pytest.fixture
@@ -73,7 +85,7 @@ async def test_openapi_contains_all_internal_case_routes() -> None:
 
 async def test_cases_can_be_filtered_and_read_with_events() -> None:
     repository = InMemoryCaseRepository()
-    service = CaseService(repository, clock=lambda: NOW)
+    service = _case_service(repository)
     created = await _create_case(service)
     assert created.case is not None
     app = _app_with_service(service)
@@ -109,7 +121,7 @@ async def test_cases_can_be_filtered_and_read_with_events() -> None:
 
 async def test_status_update_is_idempotent_and_audited() -> None:
     repository = InMemoryCaseRepository()
-    service = CaseService(repository, clock=lambda: NOW)
+    service = _case_service(repository)
     created = await _create_case(service)
     assert created.case is not None
     app = _app_with_service(service, scope=SUPERVISOR_SCOPE)
@@ -159,7 +171,7 @@ async def test_on_hold_requires_a_reason_at_the_api_boundary() -> None:
 
 async def test_invalid_transition_returns_a_conflict() -> None:
     repository = InMemoryCaseRepository()
-    service = CaseService(repository, clock=lambda: NOW)
+    service = _case_service(repository)
     created = await _create_case(service)
     assert created.case is not None
     app = _app_with_service(service, scope=SUPERVISOR_SCOPE)
@@ -181,7 +193,7 @@ async def test_invalid_transition_returns_a_conflict() -> None:
 
 
 async def test_unknown_and_malformed_case_ids_are_distinct() -> None:
-    service = CaseService(InMemoryCaseRepository(), clock=lambda: NOW)
+    service = _case_service(InMemoryCaseRepository())
     app = _app_with_service(service)
 
     async with httpx.AsyncClient(
@@ -243,7 +255,7 @@ async def test_storage_failure_returns_safe_service_unavailable_error() -> None:
 
 async def test_customer_cannot_change_status() -> None:
     repository = InMemoryCaseRepository()
-    service = CaseService(repository, clock=lambda: NOW)
+    service = _case_service(repository)
     created = await _create_case(service)
     assert created.case is not None
     app = _app_with_service(service)
@@ -263,7 +275,7 @@ async def test_customer_cannot_change_status() -> None:
 
 async def test_customer_cannot_assign() -> None:
     repository = InMemoryCaseRepository()
-    service = CaseService(repository, clock=lambda: NOW)
+    service = _case_service(repository)
     created = await _create_case(service)
     assert created.case is not None
     app = _app_with_service(service)
@@ -283,7 +295,7 @@ async def test_customer_cannot_assign() -> None:
 
 async def test_support_agent_cannot_assign() -> None:
     repository = InMemoryCaseRepository()
-    service = CaseService(repository, clock=lambda: NOW)
+    service = _case_service(repository)
     created = await _create_case(service)
     assert created.case is not None
     app = _app_with_service(service, scope=AGENT_SCOPE)
@@ -300,9 +312,139 @@ async def test_support_agent_cannot_assign() -> None:
     assert response.status_code == 403
 
 
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        None,
+        DirectoryUser(
+            tenant_id="tenant-other",
+            user_id="agent-7",
+            active=True,
+            roles=frozenset({"support_agent"}),
+        ),
+        DirectoryUser(
+            tenant_id="tenant-demo",
+            user_id="agent-7",
+            active=False,
+            roles=frozenset({"support_agent"}),
+        ),
+        DirectoryUser(
+            tenant_id="tenant-demo",
+            user_id="agent-7",
+            active=True,
+            roles=frozenset({"customer"}),
+        ),
+    ],
+)
+async def test_ineligible_assignment_targets_share_safe_404_without_writes(
+    candidate: DirectoryUser | None,
+) -> None:
+    repository = InMemoryCaseRepository()
+    created = await _create_case(_case_service(repository))
+    assert created.case is not None
+
+    class StaticDirectory:
+        async def find_user(self, *, tenant_id: str, user_id: str):
+            return candidate
+
+    service = CaseService(
+        repository,
+        identity_directory=StaticDirectory(),
+        clock=lambda: NOW,
+    )
+    app = _app_with_service(service, scope=SUPERVISOR_SCOPE)
+    before_case = repository.cases[created.case.case_id]
+    before_events = tuple(repository.events)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/internal/support-cases/{created.case.case_id}/assign",
+            json={"agent_id": "agent-7", "request_id": "api-assign-ineligible"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "assignment_target_unavailable",
+            "message": "The requested assignment target is not available.",
+        }
+    }
+    assert repository.cases[created.case.case_id] == before_case
+    assert tuple(repository.events) == before_events
+
+
+async def test_assignment_directory_outage_returns_safe_503_without_writes() -> None:
+    repository = InMemoryCaseRepository()
+    created = await _create_case(_case_service(repository))
+    assert created.case is not None
+
+    class OutageDirectory:
+        async def find_user(self, *, tenant_id: str, user_id: str):
+            raise DirectoryInfrastructureUnavailableError(
+                "upstream response leaked here"
+            )
+
+    service = CaseService(
+        repository,
+        identity_directory=OutageDirectory(),
+        clock=lambda: NOW,
+    )
+    app = _app_with_service(service, scope=SUPERVISOR_SCOPE)
+    before_case = repository.cases[created.case.case_id]
+    before_events = tuple(repository.events)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/internal/support-cases/{created.case.case_id}/assign",
+            json={"agent_id": "agent-7", "request_id": "api-assign-outage"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "identity_directory_unavailable",
+            "message": "The identity directory is temporarily unavailable.",
+        }
+    }
+    assert "upstream" not in response.text
+    assert repository.cases[created.case.case_id] == before_case
+    assert tuple(repository.events) == before_events
+
+
+async def test_missing_case_does_not_probe_assignment_target() -> None:
+    class UnexpectedDirectory:
+        async def find_user(self, *, tenant_id: str, user_id: str):
+            raise AssertionError("a hidden case must be resolved before directory lookup")
+
+    service = CaseService(
+        InMemoryCaseRepository(),
+        identity_directory=UnexpectedDirectory(),
+        clock=lambda: NOW,
+    )
+    app = _app_with_service(service, scope=SUPERVISOR_SCOPE)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/internal/support-cases/00000000-0000-0000-0000-000000000001/assign",
+            json={"agent_id": "agent-7", "request_id": "api-hidden-case"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "case_not_found"
+
+
 async def test_support_agent_cannot_see_unassigned_case() -> None:
     repository = InMemoryCaseRepository()
-    service = CaseService(repository, clock=lambda: NOW)
+    service = _case_service(repository)
     created = await _create_case(service)
     assert created.case is not None
     app = _app_with_service(service, scope=AGENT_SCOPE)
@@ -321,7 +463,7 @@ async def test_support_agent_cannot_see_unassigned_case() -> None:
 
 async def test_supervisor_assigns_and_agent_can_work_the_case() -> None:
     repository = InMemoryCaseRepository()
-    service = CaseService(repository, clock=lambda: NOW)
+    service = _case_service(repository)
     created = await _create_case(service)
     assert created.case is not None
     case_path = f"/internal/support-cases/{created.case.case_id}"
@@ -367,7 +509,7 @@ async def test_supervisor_assigns_and_agent_can_work_the_case() -> None:
 
 async def test_assign_rejects_reserved_agent_id() -> None:
     repository = InMemoryCaseRepository()
-    service = CaseService(repository, clock=lambda: NOW)
+    service = _case_service(repository)
     created = await _create_case(service)
     assert created.case is not None
     app = _app_with_service(service, scope=SUPERVISOR_SCOPE)
@@ -386,7 +528,7 @@ async def test_assign_rejects_reserved_agent_id() -> None:
 
 async def test_cross_tenant_case_is_not_visible() -> None:
     repository = InMemoryCaseRepository()
-    service = CaseService(repository, clock=lambda: NOW)
+    service = _case_service(repository)
     created = await _create_case(service)
     assert created.case is not None
     other_tenant = make_scope("customer", user_id="customer-a", tenant_id="tenant-other")

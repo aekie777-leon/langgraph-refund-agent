@@ -157,11 +157,42 @@ def test_langgraph_uses_the_custom_lifespan_app() -> None:
     assert config["http"]["app"] == "./src/agent/webapp.py:app"
 
 
+def test_production_langgraph_forces_studio_through_custom_auth() -> None:
+    config = json.loads(Path("langgraph.json").read_text(encoding="utf-8"))
+
+    assert config["auth"] == {
+        "path": "./src/agent/auth/langgraph_auth.py:auth",
+        "disable_studio_auth": True,
+    }
+
+
+def test_development_langgraph_profile_is_explicit_and_separate() -> None:
+    config = json.loads(Path("langgraph.dev.json").read_text(encoding="utf-8"))
+
+    assert config["auth"] == {
+        "path": "./src/agent/auth/langgraph_auth.py:auth",
+        "disable_studio_auth": False,
+    }
+
+
 def test_docker_image_registers_the_custom_lifespan_app() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
     assert "ENV LANGGRAPH_HTTP=" in dockerfile
     assert "/deps/project/src/agent/webapp.py:app" in dockerfile
+
+
+def test_release_versions_and_profiles_are_consistent() -> None:
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    compose = Path("compose.yaml").read_text(encoding="utf-8")
+    dockerignore = Path(".dockerignore").read_text(encoding="utf-8")
+
+    assert 'version = "0.9.0"' in pyproject
+    assert 'org.opencontainers.image.version="0.9.0"' in dockerfile
+    assert compose.count("langgraph-refund-agent:0.9.0") == 4
+    assert "Local development only" in compose
+    assert "langgraph.dev.json" in dockerignore
 
 
 def test_model_configuration_is_checked_lazily(

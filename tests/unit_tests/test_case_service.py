@@ -1,10 +1,15 @@
 """Unit tests for support-case application service behavior."""
 
+import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
 
+from agent.auth.directory import (
+    DirectoryInfrastructureUnavailableError,
+    DirectoryUser,
+)
 from agent.auth.visibility import ForbiddenError
 from agent.cases.models import (
     CaseTrigger,
@@ -16,8 +21,8 @@ from agent.cases.policy import (
     determine_handoff_policy,
 )
 from agent.cases.repository import CaseNotFoundError
-from agent.cases.service import CaseService
-from tests.fakes.identity import make_scope
+from agent.cases.service import AssignmentTargetUnavailableError, CaseService
+from tests.fakes.identity import make_scope, staff_directory
 from tests.support_cases import InMemoryCaseRepository
 
 NOW = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
@@ -37,7 +42,11 @@ def repository() -> InMemoryCaseRepository:
 
 @pytest.fixture
 def service(repository: InMemoryCaseRepository) -> CaseService:
-    return CaseService(repository, clock=lambda: NOW)
+    return CaseService(
+        repository,
+        identity_directory=staff_directory(),
+        clock=lambda: NOW,
+    )
 
 
 def _trigger(
@@ -589,3 +598,192 @@ async def test_assign_rejects_invalid_agent_ids(
             agent_id=agent_id,
             request_id=f"assign-{len(agent_id)}",
         )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        None,
+        DirectoryUser(
+            tenant_id="tenant-other",
+            user_id="agent-7",
+            active=True,
+            roles=frozenset({"support_agent"}),
+        ),
+        DirectoryUser(
+            tenant_id="tenant-demo",
+            user_id="agent-7",
+            active=False,
+            roles=frozenset({"support_agent"}),
+        ),
+        DirectoryUser(
+            tenant_id="tenant-demo",
+            user_id="agent-7",
+            active=True,
+            roles=frozenset({"customer"}),
+        ),
+    ],
+)
+async def test_ineligible_assignment_targets_share_one_result_and_do_not_write(
+    repository: InMemoryCaseRepository,
+    candidate: DirectoryUser | None,
+) -> None:
+    created = await CaseService(repository, clock=lambda: NOW).record_handoff(
+        SCOPE,
+        trigger=_trigger("message-1"),
+        decision=_medium_safety_decision(),
+    )
+    assert created.case is not None
+
+    class StaticDirectory:
+        async def find_user(self, *, tenant_id: str, user_id: str):
+            return candidate
+
+    service = CaseService(
+        repository,
+        identity_directory=StaticDirectory(),
+        clock=lambda: NOW,
+    )
+    before_case = repository.cases[created.case.case_id]
+    before_events = tuple(repository.events)
+
+    with pytest.raises(AssignmentTargetUnavailableError) as error:
+        await service.assign_case(
+            SUPERVISOR_SCOPE,
+            case_id=created.case.case_id,
+            agent_id="agent-7",
+            request_id="assign-ineligible",
+        )
+
+    assert str(error.value) == "assignment target is unavailable"
+    assert repository.cases[created.case.case_id] == before_case
+    assert tuple(repository.events) == before_events
+
+
+@pytest.mark.anyio
+async def test_directory_outage_does_not_write_case_or_event(
+    repository: InMemoryCaseRepository,
+) -> None:
+    created = await CaseService(repository, clock=lambda: NOW).record_handoff(
+        SCOPE,
+        trigger=_trigger("message-1"),
+        decision=_medium_safety_decision(),
+    )
+    assert created.case is not None
+
+    class OutageDirectory:
+        async def find_user(self, *, tenant_id: str, user_id: str):
+            raise DirectoryInfrastructureUnavailableError(
+                "identity infrastructure is unavailable"
+            )
+
+    service = CaseService(
+        repository,
+        identity_directory=OutageDirectory(),
+        clock=lambda: NOW,
+    )
+    before_case = repository.cases[created.case.case_id]
+    before_events = tuple(repository.events)
+
+    with pytest.raises(DirectoryInfrastructureUnavailableError):
+        await service.assign_case(
+            SUPERVISOR_SCOPE,
+            case_id=created.case.case_id,
+            agent_id="agent-7",
+            request_id="assign-outage",
+        )
+
+    assert repository.cases[created.case.case_id] == before_case
+    assert tuple(repository.events) == before_events
+
+
+@pytest.mark.anyio
+async def test_successful_idempotent_replay_does_not_depend_on_directory(
+    repository: InMemoryCaseRepository,
+) -> None:
+    directory = staff_directory()
+    service = CaseService(
+        repository,
+        identity_directory=directory,
+        clock=lambda: NOW,
+    )
+    created = await service.record_handoff(
+        SCOPE,
+        trigger=_trigger("message-1"),
+        decision=_medium_safety_decision(),
+    )
+    assert created.case is not None
+    await service.assign_case(
+        SUPERVISOR_SCOPE,
+        case_id=created.case.case_id,
+        agent_id="agent-7",
+        request_id="assign-1",
+    )
+
+    class OutageDirectory:
+        async def find_user(self, *, tenant_id: str, user_id: str):
+            raise AssertionError("idempotent replay must not query the directory")
+
+    replay_service = CaseService(
+        repository,
+        identity_directory=OutageDirectory(),
+        clock=lambda: NOW,
+    )
+    replay = await replay_service.assign_case(
+        SUPERVISOR_SCOPE,
+        case_id=created.case.case_id,
+        agent_id="agent-7",
+        request_id="assign-1",
+    )
+
+    assert replay.action == "status_unchanged"
+    assert len(repository.events) == 2
+
+
+@pytest.mark.anyio
+async def test_concurrent_same_assignment_writes_one_event(
+    repository: InMemoryCaseRepository,
+) -> None:
+    created = await CaseService(repository, clock=lambda: NOW).record_handoff(
+        SCOPE,
+        trigger=_trigger("message-1"),
+        decision=_medium_safety_decision(),
+    )
+    assert created.case is not None
+    ready = 0
+    release = asyncio.Event()
+
+    class BarrierDirectory:
+        async def find_user(self, *, tenant_id: str, user_id: str):
+            nonlocal ready
+            ready += 1
+            if ready == 2:
+                release.set()
+            await release.wait()
+            return DirectoryUser(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                active=True,
+                roles=frozenset({"support_agent"}),
+            )
+
+    service = CaseService(
+        repository,
+        identity_directory=BarrierDirectory(),
+        clock=lambda: NOW,
+    )
+    results = await asyncio.gather(
+        *(
+            service.assign_case(
+                SUPERVISOR_SCOPE,
+                case_id=created.case.case_id,
+                agent_id="agent-7",
+                request_id="assign-concurrent",
+            )
+            for _ in range(2)
+        )
+    )
+
+    assert {result.action for result in results} == {"assigned", "status_unchanged"}
+    assert len(repository.events) == 2

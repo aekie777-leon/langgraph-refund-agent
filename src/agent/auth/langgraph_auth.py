@@ -5,25 +5,32 @@ from typing import Any
 from langgraph_sdk import Auth
 
 from agent.auth.context import identity_from_user_payload, owner_filter
-from agent.auth.demo_provider import DemoIdentityProvider
 from agent.auth.models import AuthenticatedIdentity
-from agent.auth.provider import UnauthenticatedError
+from agent.auth.provider import (
+    IdentityInfrastructureUnavailableError,
+    UnauthenticatedError,
+)
+from agent.auth.runtime import get_identity_provider
 
 auth = Auth()
-
-_provider = DemoIdentityProvider.from_env()
-
 
 @auth.authenticate
 async def authenticate(authorization: str | None) -> dict[str, Any]:
     """Authenticate a request and return its trusted identity claims."""
     try:
-        identity = _provider.resolve(authorization_header=authorization)
+        identity = await get_identity_provider().resolve(
+            authorization_header=authorization
+        )
     except UnauthenticatedError as error:
         raise Auth.exceptions.HTTPException(
             status_code=401,
             detail="Unauthorized",
             headers={"WWW-Authenticate": "Bearer"},
+        ) from error
+    except IdentityInfrastructureUnavailableError as error:
+        raise Auth.exceptions.HTTPException(
+            status_code=503,
+            detail="Identity service unavailable",
         ) from error
     return {
         "identity": identity.identity_key,

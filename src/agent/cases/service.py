@@ -5,6 +5,10 @@ from datetime import UTC, datetime
 from typing import TypeVar
 from uuid import UUID, uuid4
 
+from agent.auth.directory import (
+    DirectoryInfrastructureUnavailableError,
+    IdentityDirectory,
+)
 from agent.auth.models import AccessScope
 from agent.auth.rbac import has_any_permission, has_permission
 from agent.auth.visibility import ForbiddenError
@@ -51,6 +55,10 @@ _RISK_LEVEL_RANK: dict[SemanticRiskLevel, int] = {
 }
 
 
+class AssignmentTargetUnavailableError(LookupError):
+    """Hide why a requested assignee is not eligible within the caller tenant."""
+
+
 def _utc_now() -> datetime:
     """Return an aware UTC timestamp."""
     return datetime.now(UTC)
@@ -85,6 +93,7 @@ class CaseService:
         self,
         repository: CaseRepository,
         *,
+        identity_directory: IdentityDirectory | None = None,
         clock: Clock = _utc_now,
         id_factory: IdFactory = uuid4,
         max_write_attempts: int = 3,
@@ -93,6 +102,7 @@ class CaseService:
         if max_write_attempts < 1:
             raise ValueError("max_write_attempts must be at least 1")
         self._repository = repository
+        self._identity_directory = identity_directory
         self._clock = clock
         self._id_factory = id_factory
         self._max_write_attempts = max_write_attempts
@@ -407,6 +417,14 @@ class CaseService:
                 raise CaseNotFoundError(str(previous_event.case_id))
             return CaseServiceResult(action="status_unchanged", case=previous_case)
 
+        if await self._repository.get_case(scope, case_id) is None:
+            raise CaseNotFoundError(str(case_id))
+
+        await self._require_assignment_target(
+            tenant_id=scope.tenant_id,
+            agent_id=agent_id,
+        )
+
         last_conflict: RuntimeError | None = None
         for _attempt in range(self._max_write_attempts):
             current = await self._repository.get_case(scope, case_id)
@@ -471,6 +489,32 @@ class CaseService:
         raise ConcurrentCaseUpdateError(
             "Could not assign the support case after concurrent write conflicts"
         ) from last_conflict
+
+    async def _require_assignment_target(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+    ) -> None:
+        """Require an active same-tenant support role before any assignment write."""
+        if self._identity_directory is None:
+            raise DirectoryInfrastructureUnavailableError(
+                "identity infrastructure is unavailable"
+            )
+        user = await self._identity_directory.find_user(
+            tenant_id=tenant_id,
+            user_id=agent_id,
+        )
+        if (
+            user is None
+            or user.tenant_id != tenant_id
+            or user.user_id != agent_id
+            or not user.active
+            or not user.roles.intersection({"support_agent", "supervisor"})
+        ):
+            raise AssignmentTargetUnavailableError(
+                "assignment target is unavailable"
+            )
 
     async def _create_case(
         self,

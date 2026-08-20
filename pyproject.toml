@@ -1,6 +1,6 @@
 [project]
 name = "langgraph-refund-agent"
-version = "0.8.0"
+version = "0.9.0"
 description = "A risk-aware, human-in-the-loop customer-service assistant built with LangGraph."
 authors = [{ name = "duxingru" }]
 readme = "README.md"
@@ -11,6 +11,7 @@ dependencies = [
     "httpx>=0.28.0",
     "langchain-openai>=1.4.2",
     "langgraph>=1.0.0",
+    "PyJWT[crypto]>=2.13.0",
     "psycopg[binary]>=3.3.4",
     "psycopg-pool>=3.3.0",
     "python-dotenv>=1.0.1",

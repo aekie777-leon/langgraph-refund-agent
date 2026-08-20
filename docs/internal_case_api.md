@@ -81,8 +81,10 @@ Allowed `on_hold_reason` values are `waiting_customer`,
 a duplicate `assigned` event; assigning the same agent again is a
 `status_unchanged` no-op. `agent_id` must be non-empty, at most 128
 characters, free of `:`, and must not use the reserved values `system` or
-`legacy`. The demo provider does not verify that the agent exists in a user
-directory; production must resolve assignees against the real identity system.
+`legacy`. From v0.9, a new assignment also requires an active same-tenant SCIM
+target mapped to `support_agent` or `supervisor`. Missing, cross-tenant,
+inactive, and wrong-role targets use the same non-enumerating 404 response;
+directory infrastructure failure returns 503 without a Case/Event write.
 
 The valid lifecycle remains:
 
@@ -112,10 +114,10 @@ errors use a stable envelope:
 | --- | --- |
 | `401` | Missing or invalid credentials |
 | `403` | Authenticated but not permitted |
-| `404` | The case does not exist or is not accessible |
+| `404` | The case is inaccessible, or the assignment target is unavailable |
 | `409` | Invalid transition or a concurrent update conflict |
 | `422` | Invalid UUID, query value, or request body |
-| `503` | Case storage is unavailable |
+| `503` | Case storage or the identity directory is unavailable |
 
 Storage errors intentionally do not expose database connection details.
 
@@ -133,10 +135,12 @@ The endpoints also appear in `/docs` under **Internal Support Cases**.
 
 ## Security boundary
 
-From v0.6 the API is authenticated and role-protected. The supplied Compose
+From v0.9 the API and LangGraph Server share one OIDC verifier and claim policy;
+the application does not trust forwarded identity headers. The supplied Compose
 configuration binds the API to `127.0.0.1`. Do not expose these routes outside
 a trusted local environment without additional gateway controls such as rate
-limiting.
+limiting, timeouts, request-size limits, TLS termination, and log redaction.
+See `v0.9_identity_access.md` for the production contract.
 
 ---
 

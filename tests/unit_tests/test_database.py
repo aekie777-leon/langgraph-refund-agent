@@ -16,6 +16,58 @@ def test_database_uri_prefers_complete_uri(monkeypatch: pytest.MonkeyPatch) -> N
     assert database_uri() == "postgresql://user:secret@db/cases"
 
 
+def test_production_database_requires_external_tls_uri() -> None:
+    uri = (
+        "postgresql://service:secret@db.example.test/refund_agent"
+        "?sslmode=verify-full"
+    )
+
+    assert database_uri({"APP_ENV": "production", "POSTGRES_URI": uri}) == uri
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {
+            "APP_ENV": "production",
+            "POSTGRES_USER": "service",
+            "POSTGRES_PASSWORD": "must-not-leak",
+            "POSTGRES_HOST": "db.example.test",
+            "POSTGRES_DB": "refund_agent",
+        },
+        {
+            "APP_ENV": "production",
+            "POSTGRES_URI": "postgresql://service:must-not-leak@db.example.test/refund_agent",
+        },
+        {
+            "APP_ENV": "production",
+            "POSTGRES_URI": (
+                "postgresql://service:must-not-leak@localhost/refund_agent"
+                "?sslmode=require"
+            ),
+        },
+        {
+            "APP_ENV": "production",
+            "POSTGRES_URI": (
+                "postgresql://service:must-not-leak@postgres/refund_agent"
+                "?sslmode=verify-full"
+            ),
+        },
+        {
+            "APP_ENV": "production",
+            "POSTGRES_URI": "not-a-postgres-connection-string",
+        },
+    ],
+)
+def test_production_database_rejects_components_plaintext_and_local_hosts(
+    environment: dict[str, str],
+) -> None:
+    with pytest.raises(RuntimeError) as error:
+        database_uri(environment)
+
+    assert "must-not-leak" not in str(error.value)
+
+
 def test_database_uri_builds_from_components(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("POSTGRES_URI", raising=False)
     monkeypatch.setenv("POSTGRES_USER", "case_user")
